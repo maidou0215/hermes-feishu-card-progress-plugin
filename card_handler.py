@@ -439,7 +439,7 @@ class FeishuCardHandler:
                 },
                 "body": {
                     "elements": [
-                        {"tag": "markdown", "content": "\u274c Processing failed. Please retry."},
+                        {"tag": "markdown", "content": "<text_tag color='red'>Error</text_tag>\n\u274c Processing failed. Please retry."},
                         {"tag": "hr"},
                         {
                             "tag": "div",
@@ -534,11 +534,20 @@ class FeishuCardHandler:
                 tool = entry.get("tool", "?")
                 preview = entry.get("preview", "")
                 safe_tool = tool.replace("`", "'")
-                content = f"**Tool** `{safe_tool}`"
+                # Use text_tag colored labels matching cc-connect style
+                content = f"<text_tag color='blue'>Tool</text_tag> `{safe_tool}`"
                 body = _format_tool_input(tool, preview)
                 if body:
                     content += "\n" + body
                 elements.append({"tag": "markdown", "content": content})
+            elif entry_type == "error":
+                text = entry.get("text", "")
+                if text:
+                    safe = _preprocess_feishu_markdown(
+                        _sanitize_markdown_urls(text)
+                    )
+                    content = f"<text_tag color='red'>Error</text_tag>\n{safe}"
+                    elements.append({"tag": "markdown", "content": content})
 
         # Add hr separators between entries
         if elements:
