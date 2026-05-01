@@ -197,30 +197,12 @@ async def _patched_edit_message(self, chat_id, message_id, content, *, finalize=
 
 
 def _patched_build_outbound_payload(self, content: str) -> tuple:
-    """Use interactive card (schema 2.0) for markdown content.
+    """Delegate to original payload builder.
 
-    This mirrors the original card-priority rendering: markdown content
-    is rendered as an interactive card for better formatting in Feishu.
-    Falls back to the original post/text format for non-markdown content.
+    Final responses use Hermes's native post/text rendering to preserve
+    mixed content (code blocks + rich text) correctly.  Only progress
+    cards use Schema 2.0 interactive format.
     """
-    # Only activate card format if card mode is enabled for this adapter
-    handler = getattr(self, "_card_handler_instance", None)
-    if handler is None:
-        return _orig_build_outbound_payload(self, content)
-
-    # Check if content has markdown that would benefit from card rendering
-    if _MARKDOWN_HINT_RE.search(content):
-        card = {
-            "schema": "2.0",
-            "config": {"wide_screen_mode": True},
-            "body": {
-                "elements": [
-                    {"tag": "markdown", "content": content},
-                ],
-            },
-        }
-        return "interactive", json.dumps(card, ensure_ascii=False)
-
     return _orig_build_outbound_payload(self, content)
 
 
@@ -273,10 +255,6 @@ def _wrap_progress_callback(original_cb):
 
 
 _orig_agent_setattr = None
-_MARKDOWN_HINT_RE = re.compile(
-    r"(?:\[.*?\]\(.*?\)|\*\*.*?\*\*|^\s*[-*]\s|\|.*\||```|`[^`]+`)",
-    re.MULTILINE,
-)
 
 
 # ---------------------------------------------------------------------------
