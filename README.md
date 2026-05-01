@@ -2,7 +2,7 @@
 
 Hermes Agent 插件 — 零代码改动，将飞书消息体验从纯文本升级为交互式卡片。
 
-参考 [cc-connect](https://github.com/anthropics/cc-connect) 的 Feishu 进度卡片 UI 实现，为 Hermes gateway 提供一致的卡片体验。
+参考 [cc-connect](https://github.com/anthropics/cc-connect) 的 Feishu 进度卡片 UI 实现，为 Hermes Feishu gateway 提供一致的卡片体验。
 
 ## 效果对比
 
