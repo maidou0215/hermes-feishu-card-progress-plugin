@@ -1,4 +1,4 @@
-# feishu-card-progress
+# hermes-feishu-card-progress-plugin
 
 Hermes Agent 插件 — 零代码改动，将飞书消息体验从纯文本升级为交互式卡片。
 
