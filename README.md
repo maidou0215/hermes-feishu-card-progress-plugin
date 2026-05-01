@@ -1,0 +1,176 @@
+# feishu-card-progress
+
+Hermes Agent 插件 — 零代码改动，将飞书消息体验从纯文本升级为交互式卡片。
+
+## 功能
+
+### 1. 工具执行进度卡片
+
+原始体验：每执行一个工具，发一条文本消息 "⚙️ bash: ls"，刷屏且不可编辑。
+
+安装后：自动创建一张进度卡片，随工具执行 **实时更新**（Patch API），不再刷屏。
+
+- 卡片 header 实时显示状态：🔵 Running → 🟢 Completed / 🔴 Failed
+- 每个工具调用显示为 `**Tool** \`name\`` + 参数预览
+- Bash/Shell 命令自动包装为 ` ```bash ``` ` 代码块
+- 超过 10 个工具时自动截断，显示 "Showing latest updates only"
+- 无工具调用的会话，卡片静默删除，不留垃圾消息
+
+### 2. Thinking/Reasoning 实时显示
+
+模型的推理过程实时显示在进度卡片中：
+
+- 灰色 notation 文本 + 💭 前缀，与工具条目视觉区分
+- 只保留最新一条 reasoning（避免卡片过长）
+- 不触发卡片创建（仅工具调用创建卡片，避免竞态）
+- 支持 DeepSeek / Qwen / Moonshot / OpenRouter 等多 provider 的 reasoning 格式
+
+### 3. Markdown 响应增强渲染
+
+原始体验：Hermes 回复用 `post` 格式渲染 Markdown，表格错位、代码块样式粗糙。
+
+安装后：所有含 Markdown 语法的响应自动使用 **Schema 2.0 卡片**渲染：
+
+- 表格对齐更精确
+- 代码块样式更清晰
+- 链接渲染更美观
+- 无多余 header，直接展示内容
+
+### 4. 网关重启容错
+
+- 活跃卡片 ID 持久化到 `feishu_active_cards.json`
+- 网关重启后自动清理上次的遗留 "Running" 卡片
+- 防止用户看到永远无法完成的进度卡片
+
+### 5. 完全自包含
+
+- **零代码改动** — 纯 monkey-patching，不修改 Hermes 任何核心文件
+- 通过 `FEISHU_PROGRESS_STYLE=card` 环境变量开关
+- 未设置时插件静默加载，不影响原有行为
+
+## 安装
+
+### 1. 复制插件目录
+
+```bash
+cp -r feishu-card-progress ~/.hermes/plugins/
+```
+
+### 2. 启用插件
+
+在 **全局** `config.yaml` 中启用插件（profile 级别的 config 不生效）：
+
+```yaml
+# ~/.hermes/config.yaml
+plugins:
+  enabled:
+    - feishu-card-progress
+```
+
+### 3. 设置环境变量
+
+在 **全局** `.env` 文件中添加（gateway 只加载 `~/.hermes/.env`，不加载 profile 的 `.env`）：
+
+```bash
+# ~/.hermes/.env
+FEISHU_PROGRESS_STYLE=card
+```
+
+### 4. Profile 模式额外步骤
+
+如果使用 `--profile` 运行 gateway，需要额外将插件链接到 profile 的 plugins 目录：
+
+```bash
+mkdir -p ~/.hermes/profiles/<your-profile>/plugins
+ln -s ~/.hermes/plugins/feishu-card-progress ~/.hermes/profiles/<your-profile>/plugins/
+```
+
+> **原因**：`--profile` 模式会将 `HERMES_HOME` 设为 `~/.hermes/profiles/<name>`，
+> 插件发现路径也随之变为 `<profile>/plugins/`。符号链接确保 profile 也能找到插件。
+
+### 5. 重启网关
+
+```bash
+hermes gateway restart
+```
+
+## 工作原理
+
+插件通过 monkey-patching 在运行时扩展 `FeishuAdapter` 和 `Agent`：
+
+| 补丁对象 | 方法 | 行为 |
+|----------|------|------|
+| FeishuAdapter | `on_processing_start` | 清理遗留卡片，重置状态 |
+| FeishuAdapter | `on_processing_complete` | 完成卡片（绿色/红色 + 页脚） |
+| FeishuAdapter | `send()` | 拦截首个进度消息 → 创建卡片 |
+| FeishuAdapter | `edit_message()` | 拦截后续进度更新 → PATCH 卡片 |
+| FeishuAdapter | `_build_outbound_payload` | Markdown 响应使用卡片格式 |
+| Agent | `__setattr__` | 拦截 `tool_progress_callback` 赋值，包装 reasoning 事件路由 |
+
+进度消息通过 emoji 前缀检测（`⚙️`、`🔍` 等），与网关的 `progress_callback` 格式匹配。
+
+Reasoning 事件通过 Agent 层拦截：当 gateway 将 `progress_callback` 赋给
+`agent.tool_progress_callback` 时，插件自动包装该回调，在 `reasoning.available`
+事件到达 gateway 的过滤逻辑之前将其路由到卡片 handler。由于 agent 在线程池中
+运行而 gateway 在主线程事件循环中，使用 `asyncio.run_coroutine_threadsafe`
+跨线程调度卡片更新。
+
+## 文件结构
+
+```
+feishu-card-progress/
+├── plugin.yaml          # 插件清单
+├── __init__.py          # 注册函数 + monkey-patching
+├── card_handler.py      # FeishuCardHandler 核心逻辑
+└── README.md            # 本文件
+```
+
+## Reasoning / Thinking
+
+Hermes 原生支持 reasoning 配置：
+
+```yaml
+# profile config.yaml
+agent:
+  reasoning_effort: medium    # 推理深度: low / medium / high
+
+display:
+  show_reasoning: true        # CLI 中显示推理过程
+```
+
+模型的 reasoning 内容通过多种格式返回：
+
+| 格式 | Provider | 说明 |
+|------|----------|------|
+| `message.reasoning` | DeepSeek, Qwen | 直接字段 |
+| `message.reasoning_content` | Moonshot AI, Novita | 替代字段名 |
+| `message.reasoning_details` | OpenRouter (unified) | `{type, summary}` 数组 |
+
+Hermes 的 `_extract_reasoning()` 函数（`run_agent.py`）会依次尝试以上格式，
+最后回退到从 `content` 中提取 `<think...</think*>` 标签内容。
+
+Reasoning 内容会实时显示在进度卡片中（灰色 notation + 💭 前缀），只保留
+最新一条，不触发卡片创建（仅 tool_use 事件创建卡片，避免竞态条件）。
+
+## 依赖
+
+- Hermes Agent >= 最新版本（需要插件系统支持）
+- `lark_oapi` Python SDK（飞书官方 SDK）
+- 飞书平台适配器已配置（`FEISHU_APP_ID`、`FEISHU_APP_SECRET`）
+
+## 对齐 cc-connect 的功能
+
+| 状态 | 功能 | 说明 |
+|------|------|------|
+| ✅ | 进度卡片 | 实时更新的交互式卡片 |
+| ✅ | 工具预览 | bash code block、文本截断 |
+| ✅ | 卡片持久化 | 网关重启后清理遗留卡片 |
+| ✅ | Markdown 卡片渲染 | 响应使用 Schema 2.0 卡片 |
+| ❌ | 流式文本预览 | cc-connect 用 streamPreview |
+| ✅ | Thinking 显示 | Agent 层拦截 reasoning 事件 |
+| ❌ | TodoWrite 格式化 | cc-connect 特有 |
+| ❌ | Done 表情推送 | cc-connect 特有 |
+
+## 许可
+
+MIT
