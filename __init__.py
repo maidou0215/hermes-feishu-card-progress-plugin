@@ -196,13 +196,47 @@ async def _patched_edit_message(self, chat_id, message_id, content, *, finalize=
     return await _orig_edit_message(self, chat_id, message_id, content, finalize=finalize)
 
 
-def _patched_build_outbound_payload(self, content: str) -> tuple:
-    """Delegate to original payload builder.
+_CODE_BLOCK_RE = re.compile(r'(```[a-z_]*\n.*?```)', re.DOTALL)
 
-    Final responses use Hermes's native post/text rendering to preserve
-    mixed content (code blocks + rich text) correctly.  Only progress
-    cards use Schema 2.0 interactive format.
+
+def _split_content_to_elements(content: str) -> list:
+    """Split content into card elements, separating code blocks from text.
+
+    This prevents code blocks from swallowing surrounding rich text when
+    rendered as a single Feishu markdown element.
     """
+    parts = _CODE_BLOCK_RE.split(content)
+    elements = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        elements.append({"tag": "markdown", "content": part})
+    return elements
+
+
+def _patched_build_outbound_payload(self, content: str) -> tuple:
+    """Use interactive card (schema 2.0) for markdown content.
+
+    Splits content into separate elements for code blocks and text,
+    preventing code fences from swallowing rich text formatting.
+    Falls back to the original post/text format for non-markdown content.
+    """
+    handler = getattr(self, "_card_handler_instance", None)
+    if handler is None:
+        return _orig_build_outbound_payload(self, content)
+
+    if _MARKDOWN_HINT_RE.search(content):
+        elements = _split_content_to_elements(content)
+        if not elements:
+            elements = [{"tag": "markdown", "content": content}]
+        card = {
+            "schema": "2.0",
+            "config": {"wide_screen_mode": True},
+            "body": {"elements": elements},
+        }
+        return "interactive", json.dumps(card, ensure_ascii=False)
+
     return _orig_build_outbound_payload(self, content)
 
 
@@ -255,6 +289,10 @@ def _wrap_progress_callback(original_cb):
 
 
 _orig_agent_setattr = None
+_MARKDOWN_HINT_RE = re.compile(
+    r"(?:\[.*?\]\(.*?\)|\*\*.*?\*\*|^\s*[-*]\s|\|.*\||```|`[^`]+`)",
+    re.MULTILINE,
+)
 
 
 # ---------------------------------------------------------------------------
