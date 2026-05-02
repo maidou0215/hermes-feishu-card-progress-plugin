@@ -59,10 +59,10 @@ _TOOL_PARSE_RE = re.compile(
 # Gateway's show_reasoning (run.py:5929) prepends a reasoning block to the
 # response content when display.show_reasoning=true.  Format:
 #   "💭 **Reasoning:**\n```\n<text>\n```\n\n<actual response>"
-_REASONING_PREFIX_RE = re.compile(
-    r'^💭 \*\*Reasoning:\*\*\n```[a-z_]*\n.*?```\n+',
-    re.DOTALL,
-)
+# NOTE: run.py now skips this prepend when FEISHU_PROGRESS_STYLE=card.
+# The string-based stripping below is a safety fallback.
+_REASONING_PREFIX = "💭 **Reasoning:**\n```"
+_REASONING_SUFFIX = "```\n\n"
 
 # Last reasoning text captured by on_thinking, used to strip from final response
 _last_reasoning_text: str = ""
@@ -161,13 +161,18 @@ async def _patched_send(self, chat_id, content, reply_to=None, metadata=None):
 
     # Strip reasoning prefix from final response (already shown in progress card).
     # Gateway prepends "💭 **Reasoning:**\n```\n...\n```\n\n<response>" when
-    # show_reasoning=true (run.py:5929).  We remove it to match cc-connect
-    # behaviour where reasoning lives only inside the progress card.
-    if isinstance(content, str):
-        content = _REASONING_PREFIX_RE.sub('', content).strip()
-        # Fallback: if regex didn't match but content starts with the captured
-        # reasoning text, strip it (covers edge cases where gateway formats
-        # reasoning differently or the model echoes it as content).
+    # show_reasoning=true (run.py:5929).  Normally skipped by run.py when
+    # FEISHU_PROGRESS_STYLE=card; this is a safety fallback.
+    if isinstance(content, str) and content.startswith(_REASONING_PREFIX):
+        # Find the LAST occurrence of the closing fence separator.
+        # Using rfind avoids false matches on embedded ``` inside reasoning.
+        end_pos = content.rfind(_REASONING_SUFFIX)
+        if end_pos != -1:
+            content = content[end_pos + len(_REASONING_SUFFIX):].strip()
+        else:
+            # No closing fence — strip the entire prefix marker
+            content = content[len(_REASONING_PREFIX):].lstrip()
+        # Fallback: if content starts with the captured reasoning text, strip it.
         if _last_reasoning_text and content.startswith(_last_reasoning_text):
             content = content[len(_last_reasoning_text):].strip()
 
