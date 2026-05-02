@@ -200,8 +200,10 @@ class FeishuCardHandler:
         logger.info("[Card] on_tool_started: tool=%s preview=%s chat=%s",
                      tool_name, (preview or "")[:60], chat_id)
 
-        if chat_id in self._completed_chats:
-            return None
+        # New turn: clear completed state so a fresh card can be created.
+        # Normally on_processing_start handles this, but some gateway paths
+        # (e.g. interrupt + retry) skip that callback.
+        self._completed_chats.discard(chat_id)
 
         entries = self._progress_entries.setdefault(chat_id, [])
         entries.append({
