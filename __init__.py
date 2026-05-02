@@ -197,13 +197,42 @@ async def _patched_edit_message(self, chat_id, message_id, content, *, finalize=
 
 
 _CODE_BLOCK_RE = re.compile(r'(```[a-z_]*\n.*?```)', re.DOTALL)
+_MAX_TABLE_DATA_ROWS = 5
+
+# Matches a markdown table: header row + separator row + data rows
+_TABLE_RE = re.compile(
+    r'(\|[^\n]+\|\n\|[-:| ]+\|\n(?:\|[^\n]+\|\n)*(?:\|[^\n]+\|)?)',
+    re.MULTILINE,
+)
+
+
+def _split_large_tables(text: str) -> str:
+    """Split markdown tables exceeding _MAX_TABLE_DATA_ROWS into paginated chunks.
+
+    Each chunk repeats the header + separator so it renders as a valid table.
+    """
+    def _replace_table(m: re.Match) -> str:
+        table = m.group(1)
+        lines = table.strip().split('\n')
+        if len(lines) < 3:
+            return table
+        header = lines[0]
+        separator = lines[1]
+        data_rows = lines[2:]
+        if len(data_rows) <= _MAX_TABLE_DATA_ROWS:
+            return table
+        chunks = []
+        for i in range(0, len(data_rows), _MAX_TABLE_DATA_ROWS):
+            chunk = [header, separator] + data_rows[i:i + _MAX_TABLE_DATA_ROWS]
+            chunks.append('\n'.join(chunk))
+        return '\n\n'.join(chunks)
+    return _TABLE_RE.sub(_replace_table, text)
 
 
 def _split_content_to_elements(content: str) -> list:
     """Split content into card elements, separating code blocks from text.
 
-    This prevents code blocks from swallowing surrounding rich text when
-    rendered as a single Feishu markdown element.
+    Also paginates markdown tables exceeding the Feishu 5-row data limit.
     """
     parts = _CODE_BLOCK_RE.split(content)
     elements = []
@@ -211,6 +240,7 @@ def _split_content_to_elements(content: str) -> list:
         part = part.strip()
         if not part:
             continue
+        part = _split_large_tables(part)
         elements.append({"tag": "markdown", "content": part})
     return elements
 
@@ -220,12 +250,8 @@ def _patched_build_outbound_payload(self, content: str) -> tuple:
 
     Splits content into separate elements for code blocks and text,
     preventing code fences from swallowing rich text formatting.
-    Falls back to the original post/text format for non-markdown content.
+    Tables exceeding the Feishu 5-row limit are automatically paginated.
     """
-    handler = getattr(self, "_card_handler_instance", None)
-    if handler is None:
-        return _orig_build_outbound_payload(self, content)
-
     if _MARKDOWN_HINT_RE.search(content):
         elements = _split_content_to_elements(content)
         if not elements:
@@ -235,9 +261,20 @@ def _patched_build_outbound_payload(self, content: str) -> tuple:
             "config": {"wide_screen_mode": True},
             "body": {"elements": elements},
         }
-        return "interactive", json.dumps(card, ensure_ascii=False)
+        payload = json.dumps(card, ensure_ascii=False)
+        logger.info(
+            "[Card] build_outbound_payload: format=interactive "
+            "content_len=%d payload_len=%d elements=%d preview=%.80s",
+            len(content), len(payload), len(elements), content[:80],
+        )
+        return "interactive", payload
 
-    return _orig_build_outbound_payload(self, content)
+    orig_result = _orig_build_outbound_payload(self, content)
+    logger.info(
+        "[Card] build_outbound_payload: format=%s content_len=%d preview=%.80s",
+        orig_result[0], len(content), content[:80],
+    )
+    return orig_result
 
 
 # ---------------------------------------------------------------------------
