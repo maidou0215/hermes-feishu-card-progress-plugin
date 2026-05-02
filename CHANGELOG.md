@@ -13,6 +13,12 @@
 
 run.py 补丁不可省略：去掉后 `_patched_send` 的字符串剥离在 response 含代码块时失败率 ~30-40%。
 
+### Removed: 表格分页逻辑
+
+移除 `_split_large_tables()` 及相关的 `_TABLE_RE`、`_MAX_TABLE_DATA_ROWS`。
+表格不可见的根因是 handler 检查导致回退到 `post` 格式（已修复），飞书卡片本身无 5 行表格限制。
+分页反而会把完整的表格拆成多个小表，降低可读性。
+
 ## 2026-05-02
 
 ### Fixed: Reasoning 泄漏到正文
