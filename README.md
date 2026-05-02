@@ -151,35 +151,6 @@ Reasoning 事件通过 Agent 层拦截：当 gateway 将 `progress_callback` 赋
 └──────────────────────────────────────────────────┘
 ```
 
-### 功能对齐
-
-| 状态 | 功能 | cc-connect | 本插件 | 说明 |
-|------|------|:----------:|:------:|------|
-| ✅ | 进度卡片 | `buildProgressCardJSONFromPayload` | `_send_progress_card` | 实时更新的交互式卡片 |
-| ✅ | 卡片 header 颜色 | blue/green/red | blue/green/red | Running/Completed/Failed |
-| ✅ | 工具预览 | `formatProgressToolInput` | `_format_tool_input` | bash code block、文本截断 |
-| ✅ | Thinking 显示 | `ProgressEntryThinking` | `on_thinking` | 灰色 notation + 💭 前缀 |
-| ✅ | Reasoning 剥离 | N/A (引擎层处理) | `_REASONING_PREFIX_RE` | 从最终响应中剥离 |
-| ✅ | 卡片持久化 | `ProgressCardPayload` | `feishu_active_cards.json` | 网关重启后清理遗留卡片 |
-| ✅ | Markdown 卡片渲染 | `renderCardMap` | `_patched_build_outbound_payload` | Schema 2.0 卡片 |
-| ✅ | 截断提示 | "Showing latest updates only" | 同 cc-connect | 超 10 条自动截断 |
-| ✅ | Footer 提示 | "no longer updating" | 同 cc-connect | 完成/失败后显示 |
-| ✅ | text_tag 彩色标签 | `<text_tag color='blue'>` | `<text_tag color='blue'>` | 蓝色 Tool、红色 Error |
-| ❌ | ToolResult 条目 | `ProgressEntryToolResult` | 无 | 显示工具执行结果 + 状态点 |
-| ✅ | Error 条目 | `ProgressEntryError` | `<text_tag color='red'>` | 红色错误标签 |
-| ❌ | i18n | 中英文自动切换 | 英文 | cc-connect 根据语言切换文案 |
-| ❌ | TodoWrite 格式化 | `formatTodoWriteInput` | 无 | 将 TODO JSON 渲染为列表 |
-| ❌ | 流式文本预览 | `streamPreview` | 无 | 实时流式显示响应 |
-| ❌ | Done 表情推送 | ✅ 推送完成表情 | 无 | 完成后推送表情反馈 |
-| ❌ | Schema V1 回退 | `renderCardMap` 双格式 | 仅 Schema 2.0 | cc-connect 支持 v1 卡片 |
-
-### 关键差异
-
-1. **text_tag 彩色标签**：本插件已使用 `<text_tag color='blue'>Tool</text_tag>` 彩色标签，与 cc-connect 风格一致
-2. **ToolResult 显示**：cc-connect 在工具执行后显示结果条目（带 🟢/🔴 状态点），本插件仅显示工具调用
-3. **i18n**：cc-connect 根据用户语言自动切换中英文（"进行中"/"Running"、"已完成"/"Completed"），本插件固定英文
-4. **entry 类型**：cc-connect 区分 5 种类型（info/thinking/tool_use/tool_result/error），本插件 3 种（thinking/tool_use/error）
-
 ## 文件结构
 
 ```
