@@ -2,6 +2,19 @@
 
 ## 2026-05-02
 
+### Changed: 精简为 1 处上游补丁
+
+经调研确认，插件只需 `gateway/run.py` 的 1 处补丁（跳过 reasoning 拼接）。
+其余 3 处补丁（run_agent.py、base.py、config.py）实际不存在也无需存在：
+
+- **run_agent.py**: 上游自带的 `_extract_reasoning()` 和 `last_reasoning` 机制正常工作，插件通过 monkey-patch `_build_assistant_message` 独立提取 reasoning
+- **base.py**: 插件直接调用 `handler.on_thinking()`，不经过 adapter 基类
+- **config.py**: 插件直接 `os.environ.get()` 读取，无需上游注册
+
+run.py 补丁不可省略：去掉后 `_patched_send` 的字符串剥离在 response 含代码块时失败率 ~30-40%。
+
+## 2026-05-02
+
 ### Fixed: Reasoning 泄漏到正文
 
 **现象**: 当 `show_reasoning=true` 且 reasoning 内容包含嵌入式代码块（如 `` ```html ``）时，response 正文中出现大段英文 reasoning，真正的中文回复消失。

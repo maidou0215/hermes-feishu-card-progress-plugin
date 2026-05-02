@@ -103,16 +103,12 @@ ln -s ~/.hermes/plugins/feishu-card-progress ~/.hermes/profiles/<your-profile>/p
 > **原因**：`--profile` 模式会将 `HERMES_HOME` 设为 `~/.hermes/profiles/<name>`，
 > 插件发现路径也随之变为 `<profile>/plugins/`。符号链接确保 profile 也能找到插件。
 
-### 5. 打上游补丁
+### 5. 打上游补丁（1 处）
 
-插件需要对 Hermes 核心文件打少量补丁（共 4 处，详见 `skills/patch-upstream/SKILL.md`）。
+插件需要对 Hermes 核心文件打 **1 处** 补丁：在 `gateway/run.py` 中让 card 模式跳过 reasoning 拼接。
+其余功能全部通过插件 monkey-patching 实现，无需修改上游代码。
 
-最重要的补丁：在 `gateway/run.py` 中让 card 模式跳过 reasoning 拼接。
-
-```bash
-# 让 AI 自动打补丁：读取补丁指南并执行
-# 或者手动参考 skills/patch-upstream/SKILL.md
-```
+详见 `skills/patch-upstream/SKILL.md`。
 
 ### 6. 重启网关
 
@@ -122,18 +118,17 @@ hermes gateway restart
 
 ## 上游更新
 
-Hermes 更新（`git pull`）后，核心文件补丁可能被覆盖。使用补丁 skill 重新应用：
+Hermes 更新（`git pull`）后，只需检查 1 处补丁是否被覆盖：
 
 ```bash
 cd ~/.hermes/hermes-agent
-git stash push -m "feishu-card-progress patches"
 git pull origin main
-git stash pop  # 可能有冲突，按 skills/patch-upstream/SKILL.md 解决
+grep -n 'FEISHU_PROGRESS_STYLE' gateway/run.py  # 应有结果
 ```
 
 或直接让 AI 执行：**"Hermes 更新了，帮我重新打 feishu-card 的补丁"**
 
-详细的补丁清单和冲突解决指南见 `skills/patch-upstream/SKILL.md`。
+详见 `skills/patch-upstream/SKILL.md`。
 
 ## 工作原理
 
