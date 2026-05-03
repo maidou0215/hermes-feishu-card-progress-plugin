@@ -76,6 +76,30 @@ def _is_progress_text(content: str) -> bool:
     return bool(_PROGRESS_LINE_RE.match(first_line))
 
 
+_MAX_INFO_LEN = 200
+
+
+def _is_intermediate_text(content: str, handler: Optional[FeishuCardHandler], chat_id: str) -> bool:
+    """Return True if *content* looks like an intermediate model status message.
+
+    Conditions (ALL must hold):
+    - Processing is active (on_processing_start was called, not yet completed)
+    - Content is short plain text (< 200 chars)
+    - No markdown formatting (headers, bold, links, code, lists, tables)
+    """
+    if not isinstance(content, str) or not content.strip():
+        return False
+    if len(content) > _MAX_INFO_LEN:
+        return False
+    if _MARKDOWN_HINT_RE.search(content):
+        return False
+    if not handler or chat_id in handler._completed_chats:
+        return False
+    if chat_id not in handler._active_chats:
+        return False
+    return True
+
+
 def _parse_progress_text(content: str) -> list[tuple[str, str]]:
     """Parse accumulated progress text into [(tool_name, preview), ...]."""
     entries: list[tuple[str, str]] = []
@@ -175,6 +199,19 @@ async def _patched_send(self, chat_id, content, reply_to=None, metadata=None):
         # Fallback: if content starts with the captured reasoning text, strip it.
         if _last_reasoning_text and content.startswith(_last_reasoning_text):
             content = content[len(_last_reasoning_text):].strip()
+
+    # Absorb short plain-text intermediate messages into the progress card
+    # instead of sending them as standalone incomplete-looking messages.
+    if isinstance(content, str):
+        handler = getattr(self, "_card_handler_instance", None)
+        if handler and chat_id in handler._active_chats and len(content) <= _MAX_INFO_LEN:
+            is_info = _is_intermediate_text(content, handler, chat_id)
+            if is_info:
+                logger.info("[Card] Absorbing intermediate text: len=%d preview=%.60s",
+                            len(content), content[:60])
+                await handler.on_info(chat_id, content)
+                from gateway.platforms.base import SendResult
+                return SendResult(success=True, message_id="info-absorbed")
 
     return await _orig_send(self, chat_id, content, reply_to=reply_to, metadata=metadata)
 
