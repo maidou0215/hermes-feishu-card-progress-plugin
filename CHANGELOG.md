@@ -2,6 +2,18 @@
 
 ## 2026-05-03
 
+### Added: Reply Chain 交互式卡片内容提取
+
+用户在飞书中引用 bot 的交互式卡片消息时，Hermes 原本只能看到 `[Interactive message]` 占位符。
+
+**修复**:
+- Monkey-patch `_build_get_message_request`：API 请求增加 `card_msg_content_type=raw_card_content` 参数，获取卡片原始 JSON
+- Monkey-patch `_extract_text_from_raw_content`：解析 `json_card` 包裹的 schema 1.0/2.0 卡片结构
+- 新增 `_extract_interactive_card_text` 和 `_extract_card_elements` 辅助函数（移植自 cc-connect Go 实现）
+
+**上游补丁**:
+- `run.py` reply chain 截断从 500 字符改为不截断，与 cc-connect 行为对齐
+
 ### Changed: 保留所有 Reasoning 条目
 
 `on_thinking()` 不再删除旧 thinking 条目，改为直接 append。
