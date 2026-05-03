@@ -90,6 +90,138 @@ def _parse_progress_text(content: str) -> list[tuple[str, str]]:
 
 
 # ---------------------------------------------------------------------------
+# Interactive card text extraction (ported from cc-connect Go implementation)
+# ---------------------------------------------------------------------------
+
+def _extract_interactive_card_text(content: str) -> str:
+    """Extract readable text from an interactive card's raw JSON content.
+
+    Handles the ``raw_card_content`` API format (``{"json_card": "..."}``
+    wrapper) and direct card JSON.  Supports both schema 1.0 and 2.0 card
+    structures.
+
+    Ported from cc-connect's ``extractInteractiveCardText`` (Go).
+    """
+    if not content:
+        return ""
+
+    card_json = content
+
+    # raw_card_content format: {"json_card": "<escaped JSON>"}
+    try:
+        parsed = json.loads(content)
+        if isinstance(parsed, dict) and "json_card" in parsed:
+            jc = parsed["json_card"]
+            card_json = jc if isinstance(jc, str) else json.dumps(jc, ensure_ascii=False)
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    try:
+        card = json.loads(card_json)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(card, dict):
+        return ""
+
+    parts: list[str] = []
+
+    # Schema 2.0: body.elements or body.property.elements
+    body = card.get("body")
+    if isinstance(body, dict):
+        elements = body.get("elements", [])
+        if not elements:
+            body_prop = body.get("property", {})
+            if isinstance(body_prop, dict):
+                elements = body_prop.get("elements", [])
+        if elements:
+            _extract_card_elements(elements, parts)
+
+    # Schema 1.0 / fallback: header.title + elements
+    if not parts:
+        header = card.get("header")
+        if isinstance(header, dict):
+            title = header.get("title", {})
+            if isinstance(title, dict):
+                t = title.get("content", "")
+                if t:
+                    parts.append(t)
+            elif isinstance(title, str) and title:
+                parts.append(title)
+
+        if not parts and isinstance(card.get("title"), str):
+            parts.append(card["title"])
+
+        elements_raw = card.get("elements", [])
+        if isinstance(elements_raw, list):
+            flat: list = []
+            for item in elements_raw:
+                if isinstance(item, list):
+                    flat.extend(item)
+                else:
+                    flat.append(item)
+            for elem in flat:
+                if not isinstance(elem, dict):
+                    continue
+                tag = elem.get("tag", "")
+                if tag == "markdown":
+                    c = elem.get("content", "")
+                    if c:
+                        parts.append(c)
+                elif tag in ("div", "note"):
+                    text_obj = elem.get("text", {})
+                    if isinstance(text_obj, dict):
+                        t = text_obj.get("content", "") or text_obj.get("text", "")
+                        if t:
+                            parts.append(t)
+                elif tag == "text":
+                    t = elem.get("text", "")
+                    if t:
+                        parts.append(t)
+
+    if not parts:
+        return ""
+    return "\n".join(parts)[:2000]
+
+
+def _extract_card_elements(elements: list, parts: list) -> None:
+    """Recursively extract text from schema 2.0 card elements."""
+    for elem in elements:
+        if not isinstance(elem, dict):
+            continue
+        tag = elem.get("tag", "")
+        content = elem.get("content", "")
+
+        # Schema 2.0 raw_card_content stores text in property.content
+        prop = elem.get("property", {})
+        if isinstance(prop, dict):
+            prop_content = prop.get("content", "")
+            if not content and prop_content:
+                content = prop_content
+
+        if tag == "markdown" and content:
+            parts.append(content)
+        elif tag == "div":
+            text_obj = elem.get("text", {})
+            if isinstance(text_obj, dict):
+                t = text_obj.get("content", "") or text_obj.get("text", "")
+                if t:
+                    parts.append(t)
+            elif not text_obj and content:
+                parts.append(content)
+        elif tag == "hr":
+            parts.append("---")
+        elif content:
+            parts.append(content)
+
+        # Recurse into elements (top-level or inside property)
+        nested = elem.get("elements", [])
+        if not nested and isinstance(prop, dict):
+            nested = prop.get("elements", [])
+        if nested:
+            _extract_card_elements(nested, parts)
+
+
+# ---------------------------------------------------------------------------
 # Lazy card-handler accessor (set on each adapter instance)
 # ---------------------------------------------------------------------------
 
@@ -351,6 +483,32 @@ def register(ctx) -> None:
     FeishuAdapter.send = _patched_send
     FeishuAdapter.edit_message = _patched_edit_message
     FeishuAdapter._build_outbound_payload = _patched_build_outbound_payload
+
+    # Reply-chain enhancement: request raw card content from Feishu API and
+    # extract text from interactive cards (ported from cc-connect).
+    _orig_build_get_msg_req = FeishuAdapter._build_get_message_request
+    _orig_extract_text = FeishuAdapter._extract_text_from_raw_content
+
+    @staticmethod
+    def _patched_build_get_msg_req(message_id: str) -> Any:
+        req = _orig_build_get_msg_req(message_id)
+        if hasattr(req, "add_query"):
+            req.add_query("card_msg_content_type", "raw_card_content")
+        return req
+
+    def _patched_extract_text(
+        self, *, msg_type: str, raw_content: str, mentions: Any = None
+    ) -> Optional[str]:
+        if msg_type in ("interactive", "card") and raw_content:
+            text = _extract_interactive_card_text(raw_content)
+            if text:
+                return text
+        return _orig_extract_text(
+            self, msg_type=msg_type, raw_content=raw_content, mentions=mentions
+        )
+
+    FeishuAdapter._build_get_message_request = _patched_build_get_msg_req
+    FeishuAdapter._extract_text_from_raw_content = _patched_extract_text
 
     # Patch AIAgent._build_assistant_message to intercept reasoning and route to card.
     # Gateway never sets reasoning_callback, so the built-in reasoning_callback path
