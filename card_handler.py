@@ -269,13 +269,10 @@ class FeishuCardHandler:
             return
 
         entries = self._progress_entries.setdefault(chat_id, [])
-        # Replace any existing thinking entry (only keep latest)
-        entries = [e for e in entries if e.get("type") != "thinking"]
         entries.append({
             "type": "thinking",
             "text": text.strip()[:500],
         })
-        self._progress_entries[chat_id] = entries
 
         # Only patch if a card already exists (created by on_tool_started)
         active_card_id = self._active_progress_cards.get(chat_id)

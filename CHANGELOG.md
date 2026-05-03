@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-05-03
+
+### Changed: 保留所有 Reasoning 条目
+
+`on_thinking()` 不再删除旧 thinking 条目，改为直接 append。
+多条 reasoning 会在进度卡片中按时间顺序显示，受 `_MAX_ENTRIES=10` 截断限制。
+与 cc-connect 行为对齐。
+
 ## 2026-05-02
 
 ### Changed: 精简为 1 处上游补丁
