@@ -85,13 +85,13 @@ def _is_intermediate_text(content: str, handler: Optional[FeishuCardHandler], ch
     Conditions (ALL must hold):
     - Processing is active (on_processing_start was called, not yet completed)
     - Content is short plain text (< 200 chars)
-    - No markdown formatting (headers, bold, links, code, lists, tables)
+    - No structural markdown (links, lists, tables, code blocks)
     """
     if not isinstance(content, str) or not content.strip():
         return False
     if len(content) > _MAX_INFO_LEN:
         return False
-    if _MARKDOWN_HINT_RE.search(content):
+    if _STRUCTURAL_MARKDOWN_RE.search(content):
         return False
     if not handler or chat_id in handler._completed_chats:
         return False
@@ -336,6 +336,13 @@ def _wrap_progress_callback(original_cb):
 _orig_agent_setattr = None
 _MARKDOWN_HINT_RE = re.compile(
     r"(?:\[.*?\]\(.*?\)|\*\*.*?\*\*|^\s*[-*]\s|\|.*\||```|`[^`]+`)",
+    re.MULTILINE,
+)
+# Structural markdown only — used to distinguish intermediate text from
+# final responses.  Inline formatting (**bold**, `code`) is allowed in
+# intermediate messages and should not prevent absorption.
+_STRUCTURAL_MARKDOWN_RE = re.compile(
+    r"(?:\[.*?\]\(.*?\)|^\s*[-*]\s|\|.*\||```)",
     re.MULTILINE,
 )
 
