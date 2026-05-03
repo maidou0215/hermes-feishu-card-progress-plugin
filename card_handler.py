@@ -87,7 +87,6 @@ class FeishuCardHandler:
         self._a = adapter
         self._active_progress_cards: Dict[str, str] = {}    # chat_id → card_msg_id
         self._progress_entries: Dict[str, List[Dict]] = {}  # chat_id → [entries]
-        self._active_chats: set = set()                      # chat_ids currently being processed
         self._completed_chats: set = set()                   # chat_ids that finished
         self._stale_cards: Dict[str, str] = {}               # orphaned cards from previous run
         self._stale_cleanup_done = False
@@ -155,7 +154,6 @@ class FeishuCardHandler:
             return
 
         chat_id = event.source.chat_id
-        self._active_chats.add(chat_id)
         self._completed_chats.discard(chat_id)
         self._active_progress_cards.pop(chat_id, None)
         self._progress_entries.pop(chat_id, None)
@@ -170,7 +168,6 @@ class FeishuCardHandler:
             return
 
         chat_id = event.source.chat_id
-        self._active_chats.discard(chat_id)
         self._completed_chats.add(chat_id)
 
         active_card_id = self._active_progress_cards.get(chat_id)
@@ -282,26 +279,6 @@ class FeishuCardHandler:
         if active_card_id:
             await self._patch_progress_card(active_card_id, chat_id, entries)
 
-    async def on_info(self, chat_id: str, text: str) -> None:
-        """Absorb intermediate model text into the card as an info entry.
-
-        Prevents short plain-text status messages from appearing as
-        standalone incomplete-looking messages in the chat.
-        """
-        if not text or not text.strip():
-            return
-        if chat_id in self._completed_chats:
-            return
-
-        entries = self._progress_entries.setdefault(chat_id, [])
-        entries.append({
-            "type": "info",
-            "text": text.strip()[:500],
-        })
-
-        active_card_id = self._active_progress_cards.get(chat_id)
-        if active_card_id:
-            await self._patch_progress_card(active_card_id, chat_id, entries)
 
     # -----------------------------------------------------------------
     # Card creation / patching / finalization
@@ -563,19 +540,6 @@ class FeishuCardHandler:
                 if body:
                     content += "\n" + body
                 elements.append({"tag": "markdown", "content": content})
-            elif entry_type == "info":
-                text = entry.get("text", "")
-                if text:
-                    safe = text.replace("`", "'")
-                    elements.append({
-                        "tag": "div",
-                        "text": {
-                            "tag": "plain_text",
-                            "content": safe,
-                            "text_size": "notation",
-                            "text_color": "grey",
-                        },
-                    })
             elif entry_type == "error":
                 text = entry.get("text", "")
                 if text:

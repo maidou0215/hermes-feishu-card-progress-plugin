@@ -67,6 +67,11 @@ _REASONING_SUFFIX = "```\n\n"
 # Last reasoning text captured by on_thinking, used to strip from final response
 _last_reasoning_text: str = ""
 
+# Whether the agent is currently processing a request (set by on_processing_start/complete).
+# When True, _patched_build_outbound_payload skips interactive conversion so streaming
+# messages stay in 'post' format (Feishu rejects msg_type changes on PATCH).
+_processing_active: bool = False
+
 
 def _is_progress_text(content: str) -> bool:
     """Return True if *content* looks like a gateway tool-progress message."""
@@ -74,30 +79,6 @@ def _is_progress_text(content: str) -> bool:
         return False
     first_line = content.strip().split("\n")[0]
     return bool(_PROGRESS_LINE_RE.match(first_line))
-
-
-_MAX_INFO_LEN = 200
-
-
-def _is_intermediate_text(content: str, handler: Optional[FeishuCardHandler], chat_id: str) -> bool:
-    """Return True if *content* looks like an intermediate model status message.
-
-    Conditions (ALL must hold):
-    - Processing is active (on_processing_start was called, not yet completed)
-    - Content is short plain text (< 200 chars)
-    - No structural markdown (links, lists, tables, code blocks)
-    """
-    if not isinstance(content, str) or not content.strip():
-        return False
-    if len(content) > _MAX_INFO_LEN:
-        return False
-    if _STRUCTURAL_MARKDOWN_RE.search(content):
-        return False
-    if not handler or chat_id in handler._completed_chats:
-        return False
-    if chat_id not in handler._active_chats:
-        return False
-    return True
 
 
 def _parse_progress_text(content: str) -> list[tuple[str, str]]:
@@ -143,7 +124,8 @@ _event_loop_ref: Any = None    # Gateway event loop   (set per-request)
 
 async def _patched_on_processing_start(self, event) -> None:
     """Wrap original on_processing_start + card setup."""
-    global _adapter_ref, _event_loop_ref
+    global _adapter_ref, _event_loop_ref, _processing_active
+    _processing_active = True
 
     # Store references for cross-thread reasoning interception
     self._current_chat_id = event.source.chat_id
@@ -161,6 +143,8 @@ async def _patched_on_processing_start(self, event) -> None:
 
 async def _patched_on_processing_complete(self, event, outcome) -> None:
     """Wrap original on_processing_complete + card finalization."""
+    global _processing_active
+    _processing_active = False
     handler = _get_card_handler(self)
     await handler.on_processing_complete(event, outcome)
     # Call original (removes Typing reaction, adds failure reaction)
@@ -200,24 +184,16 @@ async def _patched_send(self, chat_id, content, reply_to=None, metadata=None):
         if _last_reasoning_text and content.startswith(_last_reasoning_text):
             content = content[len(_last_reasoning_text):].strip()
 
-    # Absorb short plain-text intermediate messages into the progress card
-    # instead of sending them as standalone incomplete-looking messages.
-    if isinstance(content, str):
-        handler = getattr(self, "_card_handler_instance", None)
-        if handler and chat_id in handler._active_chats and len(content) <= _MAX_INFO_LEN:
-            is_info = _is_intermediate_text(content, handler, chat_id)
-            if is_info:
-                logger.info("[Card] Absorbing intermediate text: len=%d preview=%.60s",
-                            len(content), content[:60])
-                await handler.on_info(chat_id, content)
-                from gateway.platforms.base import SendResult
-                return SendResult(success=True, message_id="info-absorbed")
-
     return await _orig_send(self, chat_id, content, reply_to=reply_to, metadata=metadata)
 
 
 async def _patched_edit_message(self, chat_id, message_id, content, *, finalize=False):
-    """Redirect progress edits to card PATCH (replace, not append)."""
+    """Redirect progress edits to card PATCH (replace, not append).
+
+    Non-progress edits (e.g. streaming consumer updates) must use the
+    original _build_outbound_payload to avoid converting a 'post' message
+    to 'interactive' mid-stream — Feishu rejects msg_type changes on PATCH.
+    """
     if isinstance(content, str) and _is_progress_text(content):
         handler = _get_card_handler(self)
         # Use passed chat_id, or fall back to reverse lookup from active cards
@@ -235,7 +211,22 @@ async def _patched_edit_message(self, chat_id, message_id, content, *, finalize=
             return SendResult(success=True, message_id=message_id)
         # Card not found — fall through to normal edit
 
-    return await _orig_edit_message(self, chat_id, message_id, content, finalize=finalize)
+    # For non-progress edits (streaming, etc.), bypass _patched_build_outbound_payload
+    # to keep the original msg_type (post/text).  Feishu rejects PATCH requests that
+    # change msg_type (e.g. post → interactive).
+    content = self.format_message(content)
+    msg_type, payload = _orig_build_outbound_payload(self, content)
+    body = self._build_update_message_body(msg_type=msg_type, content=payload)
+    request = self._build_update_message_request(message_id=message_id, request_body=body)
+    try:
+        response = await asyncio.to_thread(self._client.im.v1.message.update, request)
+        result = self._finalize_send_result(response, "update failed")
+        if result.success:
+            result.message_id = message_id
+        return result
+    except Exception as exc:
+        logger.error("[Feishu] Failed to edit message %s: %s", message_id, exc, exc_info=True)
+        return SendResult(success=False, error=str(exc))
 
 
 _CODE_BLOCK_RE = re.compile(r'(```[a-z_]*\n.*?```)', re.DOTALL)
@@ -256,10 +247,17 @@ def _split_content_to_elements(content: str) -> list:
 def _patched_build_outbound_payload(self, content: str) -> tuple:
     """Use interactive card (schema 2.0) for markdown content.
 
-    Splits content into separate elements for code blocks and text,
-    preventing code fences from swallowing rich text formatting.
-    Tables exceeding the Feishu 5-row limit are automatically paginated.
+    When _processing_active is True (agent is running), skip interactive
+    conversion so streaming messages stay in 'post' format — Feishu
+    rejects msg_type changes on PATCH, and the StreamConsumer creates
+    the first message via send() then edits it repeatedly.
+
+    After processing completes, the flag is cleared and the final
+    non-streamed send() (if any) gets the interactive card format.
     """
+    if _processing_active:
+        return _orig_build_outbound_payload(self, content)
+
     if _MARKDOWN_HINT_RE.search(content):
         elements = _split_content_to_elements(content)
         if not elements:
@@ -336,13 +334,6 @@ def _wrap_progress_callback(original_cb):
 _orig_agent_setattr = None
 _MARKDOWN_HINT_RE = re.compile(
     r"(?:\[.*?\]\(.*?\)|\*\*.*?\*\*|^\s*[-*]\s|\|.*\||```|`[^`]+`)",
-    re.MULTILINE,
-)
-# Structural markdown only — used to distinguish intermediate text from
-# final responses.  Inline formatting (**bold**, `code`) is allowed in
-# intermediate messages and should not prevent absorption.
-_STRUCTURAL_MARKDOWN_RE = re.compile(
-    r"(?:\[.*?\]\(.*?\)|^\s*[-*]\s|\|.*\||```)",
     re.MULTILINE,
 )
 

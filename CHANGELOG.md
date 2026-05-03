@@ -2,7 +2,22 @@
 
 ## 2026-05-03
 
-### Added: 中间文本吸收到进度卡片
+### Fixed: 流式输出 + 进度卡片并行工作
+
+启用 Hermes 流式输出后，`_patched_build_outbound_payload` 仍将流式首条消息转为
+`interactive` 格式，导致 StreamConsumer 后续 `edit_message` 无法用 `post` 格式
+PATCH（飞书不允许 msg_type 变更），回复内容分片。
+
+修复：新增 `_processing_active` 模块级 flag，处理期间跳过 interactive 转换，
+流式消息统一使用 `post` 格式。处理结束后恢复正常 interactive 格式（非流式场景）。
+
+同时修复 `_patched_edit_message` 中非进度文本的 PATCH 路径，绕过
+`_patched_build_outbound_payload` 直接调用原始方法，避免 msg_type 变更冲突。
+
+### Removed: 中间文本吸收功能
+
+先前尝试的 info 吸收方案不可靠（短文本最终回复与中间消息特征重叠，
+误判率高），已回退。改用流式输出从根本上解决中间消息的显示问题。
 
 模型的短文本中间消息（如"好，需要补两块：..."）不再作为独立消息发送，
 而是吸收到进度卡片中显示为灰色 info 条目。避免出现"话没说完"的视觉效果。
