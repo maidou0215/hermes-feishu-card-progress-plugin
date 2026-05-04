@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.1.1 (2026-05-04)
+
+### Fixed: 进度卡片引用回复提取只返回 `---`
+
+v1.1.0 引入的 `_extract_card_elements` 中 `div` 分支使用了 `elif content:` 而非 `if content:`。
+由于 `elem.get("text", {})` 返回空 dict（仍是 dict 实例），`elif` 分支永远不会执行，
+导致 `raw_card_content` 格式的进度卡片只能提取到 `hr` 元素（`---`）。
+
+同时增加了 `property.text.property.content` 嵌套路径处理，完整支持 `raw_card_content` API
+返回的 schema 2.0 卡片结构。
+
 ## v1.1.0 (2026-05-03)
 
 ### Added: Reply Chain 交互式卡片内容提取
