@@ -1,5 +1,5 @@
 name: feishu-card-progress
-version: 1.1.0
+version: 1.1.1
 description: "Interactive Feishu card progress overlay for Hermes gateway — shows tool execution progress as a live-updating card instead of text messages."
 author: "@Novence"
 hooks:
