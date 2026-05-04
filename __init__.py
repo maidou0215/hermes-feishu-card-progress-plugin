@@ -184,29 +184,48 @@ def _extract_interactive_card_text(content: str) -> str:
 
 
 def _extract_card_elements(elements: list, parts: list) -> None:
-    """Recursively extract text from schema 2.0 card elements."""
+    """Recursively extract text from schema 2.0 card elements.
+
+    Handles both direct card JSON (``{"tag": "markdown", "content": "..."}``)
+    and ``raw_card_content`` format where text lives in nested
+    ``property.text.property.content`` paths.
+    """
     for elem in elements:
         if not isinstance(elem, dict):
             continue
         tag = elem.get("tag", "")
         content = elem.get("content", "")
 
-        # Schema 2.0 raw_card_content stores text in property.content
         prop = elem.get("property", {})
-        if isinstance(prop, dict):
-            prop_content = prop.get("content", "")
-            if not content and prop_content:
-                content = prop_content
+        if not isinstance(prop, dict):
+            prop = {}
+
+        # raw_card_content: text is in property.content
+        prop_content = prop.get("content", "")
+        if not content and prop_content:
+            content = prop_content
+
+        # raw_card_content: div/note elements store text in property.text.property.content
+        # (mirrors cc-connect's handling of property.text nested element)
+        prop_text = prop.get("text", {})
+        if isinstance(prop_text, dict) and not content:
+            text_prop = prop_text.get("property", {})
+            if isinstance(text_prop, dict):
+                text_content = text_prop.get("content", "")
+                if text_content:
+                    content = text_content
 
         if tag == "markdown" and content:
             parts.append(content)
-        elif tag == "div":
+        elif tag in ("div", "note"):
+            # Check elem.text, then property.text.property.content, then content
             text_obj = elem.get("text", {})
             if isinstance(text_obj, dict):
                 t = text_obj.get("content", "") or text_obj.get("text", "")
                 if t:
                     parts.append(t)
-            elif not text_obj and content:
+                    continue
+            if content:
                 parts.append(content)
         elif tag == "hr":
             parts.append("---")
