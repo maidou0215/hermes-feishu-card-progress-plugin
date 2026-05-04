@@ -512,7 +512,6 @@ class FeishuCardHandler:
                     "text_color": "grey",
                 },
             })
-            elements.append({"tag": "hr"})
 
         for entry in entries:
             entry_type = entry.get("type", "")
