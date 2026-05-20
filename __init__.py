@@ -262,6 +262,7 @@ def _get_card_handler(adapter) -> Optional[FeishuCardHandler]:
 # schedule card updates via asyncio.run_coroutine_threadsafe.
 _adapter_ref: Any = None       # FeishuAdapter instance (set per-request)
 _event_loop_ref: Any = None    # Gateway event loop   (set per-request)
+_pending_completed_chat: str = ""  # chat_id awaiting final response with green header
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +328,12 @@ async def _patched_send(self, chat_id, content, reply_to=None, metadata=None):
         if _last_reasoning_text and content.startswith(_last_reasoning_text):
             content = content[len(_last_reasoning_text):].strip()
 
+    # If this chat has an active progress card, the final response gets a green header.
+    global _pending_completed_chat
+    handler = _get_card_handler(self)
+    if chat_id and chat_id in handler._active_progress_cards:
+        _pending_completed_chat = chat_id
+
     return await _orig_send(self, chat_id, content, reply_to=reply_to, metadata=metadata)
 
 
@@ -378,15 +385,19 @@ def _patched_build_outbound_payload(self, content: str) -> tuple:
         elements = _split_content_to_elements(content)
         if not elements:
             elements = [{"tag": "markdown", "content": content}]
-        card = {
+
+        global _pending_completed_chat
+        card: dict = {
             "schema": "2.0",
             "config": {"wide_screen_mode": True},
-            "header": {
-                "title": {"tag": "plain_text", "content": "Hermes · Completed"},
-                "template": "green",
-            },
             "body": {"elements": elements},
         }
+        if _pending_completed_chat:
+            card["header"] = {
+                "title": {"tag": "plain_text", "content": "Hermes · Completed"},
+                "template": "green",
+            }
+            _pending_completed_chat = ""
         payload = json.dumps(card, ensure_ascii=False)
         logger.info(
             "[Card] build_outbound_payload: format=interactive "
@@ -532,6 +543,24 @@ def register(ctx) -> None:
 
     FeishuAdapter._build_get_message_request = _patched_build_get_msg_req
     FeishuAdapter._extract_text_from_raw_content = _patched_extract_text
+
+    # Strip root_id from inbound messages to prevent auto-creating topics.
+    # Hermes upstream uses root_id as a fallback for thread_id, which causes
+    # every reply to create a new topic thread in group chats.
+    _orig_on_message_event = FeishuAdapter._on_message_event
+
+    def _root_id_stripping_on_message_event(self, data):
+        try:
+            event = data.event if hasattr(data, "event") else data
+            msg = getattr(event, "message", None)
+            if msg and hasattr(msg, "root_id"):
+                msg.root_id = None
+        except Exception:
+            pass
+        return _orig_on_message_event(self, data)
+
+    FeishuAdapter._on_message_event = _root_id_stripping_on_message_event
+    logger.info("[feishu-card-progress] root_id stripped from inbound messages")
 
     # Patch AIAgent._build_assistant_message to intercept reasoning and route to card.
     # Gateway never sets reasoning_callback, so the built-in reasoning_callback path
