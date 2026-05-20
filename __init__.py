@@ -262,8 +262,6 @@ def _get_card_handler(adapter) -> Optional[FeishuCardHandler]:
 # schedule card updates via asyncio.run_coroutine_threadsafe.
 _adapter_ref: Any = None       # FeishuAdapter instance (set per-request)
 _event_loop_ref: Any = None    # Gateway event loop   (set per-request)
-_pending_completed_chat: str = ""  # chat_id awaiting final response with green header
-_green_header_enabled: bool = False  # set from env in register()
 
 
 # ---------------------------------------------------------------------------
@@ -335,12 +333,6 @@ async def _patched_send(self, chat_id, content, reply_to=None, metadata=None):
         if _last_reasoning_text and content.startswith(_last_reasoning_text):
             content = content[len(_last_reasoning_text):].strip()
 
-    # If this chat has an active progress card, the final response gets a green header.
-    global _pending_completed_chat
-    handler = _get_card_handler(self)
-    if chat_id and chat_id in handler._active_progress_cards:
-        _pending_completed_chat = chat_id
-
     return await _orig_send(self, chat_id, content, reply_to=reply_to, metadata=metadata)
 
 
@@ -364,61 +356,6 @@ async def _patched_edit_message(self, chat_id, message_id, content, *, finalize=
         # Card not found — fall through to normal edit
 
     return await _orig_edit_message(self, chat_id, message_id, content, finalize=finalize)
-
-
-_CODE_BLOCK_RE = re.compile(r'(```[a-z_]*\n.*?```)', re.DOTALL)
-
-
-def _split_content_to_elements(content: str) -> list:
-    """Split content into card elements, separating code blocks from text."""
-    parts = _CODE_BLOCK_RE.split(content)
-    elements = []
-    for part in parts:
-        part = part.strip()
-        if not part:
-            continue
-        elements.append({"tag": "markdown", "content": part})
-    return elements
-
-
-def _patched_build_outbound_payload(self, content: str) -> tuple:
-    """Use interactive card (schema 2.0) for markdown content.
-
-    Splits content into separate elements for code blocks and text,
-    preventing code fences from swallowing rich text formatting.
-    Tables exceeding the Feishu 5-row limit are automatically paginated.
-    """
-    if _MARKDOWN_HINT_RE.search(content):
-        elements = _split_content_to_elements(content)
-        if not elements:
-            elements = [{"tag": "markdown", "content": content}]
-
-        global _pending_completed_chat
-        card: dict = {
-            "schema": "2.0",
-            "config": {"wide_screen_mode": True},
-            "body": {"elements": elements},
-        }
-        if _green_header_enabled and _pending_completed_chat:
-            card["header"] = {
-                "title": {"tag": "plain_text", "content": "Hermes · Completed"},
-                "template": "green",
-            }
-            _pending_completed_chat = ""
-        payload = json.dumps(card, ensure_ascii=False)
-        logger.info(
-            "[Card] build_outbound_payload: format=interactive "
-            "content_len=%d payload_len=%d elements=%d preview=%.80s",
-            len(content), len(payload), len(elements), content[:80],
-        )
-        return "interactive", payload
-
-    orig_result = _orig_build_outbound_payload(self, content)
-    logger.info(
-        "[Card] build_outbound_payload: format=%s content_len=%d preview=%.80s",
-        orig_result[0], len(content), content[:80],
-    )
-    return orig_result
 
 
 # ---------------------------------------------------------------------------
@@ -470,10 +407,6 @@ def _wrap_progress_callback(original_cb):
 
 
 _orig_agent_setattr = None
-_MARKDOWN_HINT_RE = re.compile(
-    r"(?:\[.*?\]\(.*?\)|\*\*.*?\*\*|^\s*[-*]\s|\|.*\||```|`[^`]+`)",
-    re.MULTILINE,
-)
 
 
 # ---------------------------------------------------------------------------
@@ -483,7 +416,6 @@ _orig_on_processing_start = None
 _orig_on_processing_complete = None
 _orig_send = None
 _orig_edit_message = None
-_orig_build_outbound_payload = None
 _orig_agent_setattr = None
 
 
@@ -494,8 +426,8 @@ _orig_agent_setattr = None
 def register(ctx) -> None:
     """Monkey-patch FeishuAdapter + Agent to add interactive card progress."""
     global _orig_on_processing_start, _orig_on_processing_complete
-    global _orig_send, _orig_edit_message, _orig_build_outbound_payload
-    global _orig_agent_setattr, _green_header_enabled
+    global _orig_send, _orig_edit_message
+    global _orig_agent_setattr
 
     # Only activate when explicitly enabled
     style = os.environ.get("FEISHU_PROGRESS_STYLE", "").lower()
@@ -503,10 +435,6 @@ def register(ctx) -> None:
         logger.info("[feishu-card-progress] Plugin loaded but inactive "
                     "(set FEISHU_PROGRESS_STYLE=card to activate)")
         return
-
-    _green_header_enabled = os.environ.get(
-        "FEISHU_PROGRESS_GREEN_HEADER", ""
-    ).lower() in ("true", "1", "yes")
 
     try:
         from gateway.platforms.feishu import FeishuAdapter
@@ -520,14 +448,12 @@ def register(ctx) -> None:
     _orig_on_processing_complete = FeishuAdapter.on_processing_complete
     _orig_send = FeishuAdapter.send
     _orig_edit_message = FeishuAdapter.edit_message
-    _orig_build_outbound_payload = FeishuAdapter._build_outbound_payload
 
     # Apply adapter patches
     FeishuAdapter.on_processing_start = _patched_on_processing_start
     FeishuAdapter.on_processing_complete = _patched_on_processing_complete
     FeishuAdapter.send = _patched_send
     FeishuAdapter.edit_message = _patched_edit_message
-    FeishuAdapter._build_outbound_payload = _patched_build_outbound_payload
 
     # Reply-chain enhancement: request raw card content from Feishu API and
     # extract text from interactive cards (ported from cc-connect).
