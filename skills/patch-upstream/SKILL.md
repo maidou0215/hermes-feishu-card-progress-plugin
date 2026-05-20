@@ -1,7 +1,7 @@
 ---
 name: feishu-card-patch-upstream
 description: Hermes 上游更新后，为 feishu-card-progress 插件重新打补丁。在 `cd ~/.hermes/hermes-agent && git pull` 之后使用。
-version: 5.0.0
+version: 4.0.0
 author: Novence
 ---
 
@@ -10,7 +10,7 @@ author: Novence
 Hermes 源码是 git clone（`~/.hermes/hermes-agent/`，remote: `origin` → `NousResearch/hermes-agent`）。
 插件自身（`feishu-card-progress/`）是独立文件，不会冲突。
 
-**需要 2 个上游补丁**，其余功能全部通过插件 monkey-patching 实现。
+**需要 2 个补丁**，其余功能全部通过插件 monkey-patching 实现。
 
 ## 补丁 1: run.py — 跳过 reasoning 拼接
 
@@ -65,8 +65,8 @@ cd ~/.hermes/hermes-agent
 git pull origin main
 
 # 2. 检查补丁是否还在
-grep -n 'FEISHU_PROGRESS_STYLE' gateway/run.py  # 补丁 1
-grep -n 'reply_to_text\[:500\]' gateway/run.py   # 补丁 2（应无结果）
+grep -n 'FEISHU_PROGRESS_STYLE' gateway/run.py          # 补丁 1
+grep -n 'reply_to_text\[:500\]' gateway/run.py           # 补丁 2（应无结果）
 
 # 3. 如果被覆盖，重新应用上面的补丁
 
@@ -81,7 +81,7 @@ hermes gateway restart
 之前有一个本地补丁（commit `a79b0ec46`）将 `root_id` 加入了 `thread_id` 的回退链，
 导致引用回复自动创建话题。该 patch 已于 2026-05-09 还原。
 
-**v1.2.1 起，插件通过 monkey-patch `_on_message_event` 自动清除 `root_id`**，
+**v1.2.0 起，插件通过 monkey-patch `_on_message_event` 自动清除 `root_id`**，
 不再需要手动修改 `feishu.py`，Hermes 更新后也不会复发。
 
 ## 为什么其他补丁不需要
@@ -93,5 +93,6 @@ hermes gateway restart
 | 环境变量读取 | 插件直接 `os.environ.get("FEISHU_PROGRESS_STYLE")` 读取 |
 | Interactive 卡片文本提取 | 插件 monkey-patch `_build_get_message_request`（加 API 参数）和 `_extract_text_from_raw_content`（解析 `json_card` 格式） |
 | Reply chain 截断 | 补丁 2 已处理 |
+| root_id 话题创建 | 插件 monkey-patch `_on_message_event` 自动清除 root_id |
 
 插件是完全自包含的，除了 run.py 这 2 个补丁外，不依赖任何上游代码修改。

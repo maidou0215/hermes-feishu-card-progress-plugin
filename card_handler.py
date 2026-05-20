@@ -214,8 +214,9 @@ class FeishuCardHandler:
 
         active_card_id = self._active_progress_cards.get(chat_id)
         if not active_card_id:
-            # Lazy-create the card
-            active_card_id = await self._send_progress_card(chat_id)
+            # Lazy-create the card (reply to user message if available)
+            reply_to = getattr(self._a, "_reply_to_message_id", None)
+            active_card_id = await self._send_progress_card(chat_id, reply_to=reply_to)
             if active_card_id:
                 self._active_progress_cards[chat_id] = active_card_id
                 self._save_active_cards()
@@ -288,7 +289,9 @@ class FeishuCardHandler:
             return entries, False
         return entries[-_MAX_ENTRIES:], True
 
-    async def _send_progress_card(self, chat_id: str) -> Optional[str]:
+    async def _send_progress_card(
+        self, chat_id: str, reply_to: Optional[str] = None
+    ) -> Optional[str]:
         a = self._a
         if not a._client:
             return None
@@ -306,17 +309,31 @@ class FeishuCardHandler:
                     ],
                 },
             }
-            body = a._build_create_message_body(
-                receive_id=chat_id,
-                msg_type="interactive",
-                content=json.dumps(card, ensure_ascii=False),
-                uuid_value=str(uuid.uuid4()),
-            )
-            request = a._build_create_message_request("chat_id", body)
-            response = await asyncio.wait_for(
-                asyncio.to_thread(a._client.im.v1.message.create, request),
-                timeout=_API_TIMEOUT,
-            )
+            card_json = json.dumps(card, ensure_ascii=False)
+            if reply_to:
+                body = a._build_reply_message_body(
+                    content=card_json,
+                    msg_type="interactive",
+                    reply_in_thread=False,
+                    uuid_value=str(uuid.uuid4()),
+                )
+                request = a._build_reply_message_request(reply_to, body)
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(a._client.im.v1.message.reply, request),
+                    timeout=_API_TIMEOUT,
+                )
+            else:
+                body = a._build_create_message_body(
+                    receive_id=chat_id,
+                    msg_type="interactive",
+                    content=card_json,
+                    uuid_value=str(uuid.uuid4()),
+                )
+                request = a._build_create_message_request("chat_id", body)
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(a._client.im.v1.message.create, request),
+                    timeout=_API_TIMEOUT,
+                )
             msg_id = a._extract_response_field(response, "message_id")
             if msg_id:
                 logger.info("[Card] Created progress card: %s", msg_id)
