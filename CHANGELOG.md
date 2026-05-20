@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.2.1 (2026-05-20)
+
+### Fixed: 绿色 Completed 头部误加到所有消息
+
+v1.2.0 将 `header: {Hermes · Completed, green}` 硬编码到 `_build_outbound_payload`，
+导致每条 markdown 回复（包括普通对话）都显示绿色头部。改为仅在 chat 有活跃进度卡片时
+才给最终回复添加绿色头部。
+
+### Fixed: 引用回复自动创建话题
+
+Hermes 上游使用 `root_id` 作为 `thread_id` 的回退值，导致每次引用回复都在群聊中
+自动创建话题。插件新增 monkey-patch `_on_message_event`，在消息处理前将
+`message.root_id` 置为 `None`，不再需要手动修改 `feishu.py`，且 Hermes 更新后
+不会复发。
+
 ## v1.2.0 (2026-05-09)
 
 ### Changed: Thinking 渲染回退

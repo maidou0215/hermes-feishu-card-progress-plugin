@@ -263,6 +263,7 @@ def _get_card_handler(adapter) -> Optional[FeishuCardHandler]:
 _adapter_ref: Any = None       # FeishuAdapter instance (set per-request)
 _event_loop_ref: Any = None    # Gateway event loop   (set per-request)
 _pending_completed_chat: str = ""  # chat_id awaiting final response with green header
+_green_header_enabled: bool = False  # set from env in register()
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +393,7 @@ def _patched_build_outbound_payload(self, content: str) -> tuple:
             "config": {"wide_screen_mode": True},
             "body": {"elements": elements},
         }
-        if _pending_completed_chat:
+        if _green_header_enabled and _pending_completed_chat:
             card["header"] = {
                 "title": {"tag": "plain_text", "content": "Hermes · Completed"},
                 "template": "green",
@@ -488,7 +489,7 @@ def register(ctx) -> None:
     """Monkey-patch FeishuAdapter + Agent to add interactive card progress."""
     global _orig_on_processing_start, _orig_on_processing_complete
     global _orig_send, _orig_edit_message, _orig_build_outbound_payload
-    global _orig_agent_setattr
+    global _orig_agent_setattr, _green_header_enabled
 
     # Only activate when explicitly enabled
     style = os.environ.get("FEISHU_PROGRESS_STYLE", "").lower()
@@ -496,6 +497,10 @@ def register(ctx) -> None:
         logger.info("[feishu-card-progress] Plugin loaded but inactive "
                     "(set FEISHU_PROGRESS_STYLE=card to activate)")
         return
+
+    _green_header_enabled = os.environ.get(
+        "FEISHU_PROGRESS_GREEN_HEADER", ""
+    ).lower() in ("true", "1", "yes")
 
     try:
         from gateway.platforms.feishu import FeishuAdapter
