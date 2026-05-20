@@ -302,6 +302,12 @@ async def _patched_send(self, chat_id, content, reply_to=None, metadata=None):
         handler = _get_card_handler(self)
         entries = _parse_progress_text(content)
 
+        # Suppress clarify progress — Hermes already sends the question directly,
+        # the progress callback would only create a duplicate.
+        if all(name == "clarify" for name, _ in entries):
+            from gateway.platforms.base import SendResult
+            return SendResult(success=True)
+
         # First progress message — use on_tool_started (append + create card)
         card_id = None
         for tool_name, preview in entries:
