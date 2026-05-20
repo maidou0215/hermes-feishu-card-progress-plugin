@@ -153,9 +153,10 @@ grep -n 'reply_to_text\[:500\]' gateway/run.py   # 补丁 2：应无结果
 |----------|------|------|
 | FeishuAdapter | `on_processing_start` | 清理遗留卡片，重置状态 |
 | FeishuAdapter | `on_processing_complete` | 完成卡片（绿色/红色 + 页脚） |
-| FeishuAdapter | `send()` | 拦截首个进度消息 → 创建卡片；剥离残留 reasoning 前缀 |
+| FeishuAdapter | `_on_message_event` | 清除 `root_id`，防止引用回复自动创建话题 |
+| FeishuAdapter | `send()` | 拦截首个进度消息 → 创建卡片；有活跃卡片时标记最终回复加绿色头部 |
 | FeishuAdapter | `edit_message()` | 拦截后续进度更新 → PATCH 卡片 |
-| FeishuAdapter | `_build_outbound_payload` | Markdown 响应使用 Schema 2.0 卡片格式 |
+| FeishuAdapter | `_build_outbound_payload` | Markdown 响应使用 Schema 2.0 卡片格式；有活跃进度卡片时加绿色 Completed 头部 |
 | FeishuAdapter | `_build_get_message_request` | API 请求增加 `card_msg_content_type=raw_card_content` 参数 |
 | FeishuAdapter | `_extract_text_from_raw_content` | 解析 interactive 卡片的 `json_card` 格式，提取引用内容 |
 | Agent | `__setattr__` | 拦截 `tool_progress_callback` 赋值，包装 reasoning 事件路由 |

@@ -1,7 +1,7 @@
 ---
 name: feishu-card-patch-upstream
 description: Hermes 上游更新后，为 feishu-card-progress 插件重新打补丁。在 `cd ~/.hermes/hermes-agent && git pull` 之后使用。
-version: 4.0.0
+version: 5.0.0
 author: Novence
 ---
 
@@ -70,22 +70,19 @@ grep -n 'reply_to_text\[:500\]' gateway/run.py   # 补丁 2（应无结果）
 
 # 3. 如果被覆盖，重新应用上面的补丁
 
-# 4. 重启 gateway
-hermes gateway restart --all
+# 4. 重启 gateway（不要用 --all，按 profile 重启）
+hermes gateway restart
 ```
 
 ## 历史本地 patch 注意事项
 
+### root_id 自动话题创建（已由插件自动处理）
+
 之前有一个本地补丁（commit `a79b0ec46`）将 `root_id` 加入了 `thread_id` 的回退链，
 导致引用回复自动创建话题。该 patch 已于 2026-05-09 还原。
 
-如果 `git pull` 后该 patch 残留（`grep 'root_id.*thread_id' gateway/platforms/feishu.py`
-有结果），需要再次还原：
-
-1. 删除 `thread_id = ... or getattr(message, "root_id", None) or None` 整行
-2. 将 `thread_id=thread_id` 改为 `thread_id=getattr(message, "thread_id", None) or None`
-3. 删除 `reply_to_message_id` 中的 `or getattr(message, "root_id", None)`
-4. 删除 `skipping top-level fallback to avoid creating a new topic` 相关的 if 块
+**v1.2.1 起，插件通过 monkey-patch `_on_message_event` 自动清除 `root_id`**，
+不再需要手动修改 `feishu.py`，Hermes 更新后也不会复发。
 
 ## 为什么其他补丁不需要
 
