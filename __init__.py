@@ -180,7 +180,7 @@ def _extract_interactive_card_text(content: str) -> str:
 
     if not parts:
         return ""
-    return "\n".join(parts)[:2000]
+    return "\n".join(parts)[:5000]
 
 
 def _extract_card_elements(elements: list, parts: list) -> None:
@@ -381,6 +381,10 @@ def _patched_build_outbound_payload(self, content: str) -> tuple:
         card = {
             "schema": "2.0",
             "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": "Hermes · Completed"},
+                "template": "green",
+            },
             "body": {"elements": elements},
         }
         payload = json.dumps(card, ensure_ascii=False)

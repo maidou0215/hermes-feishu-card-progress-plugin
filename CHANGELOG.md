@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.2.0 (2026-05-09)
+
+### Changed: Thinking 渲染回退
+
+Thinking 条目渲染从 markdown `<text_tag>` 回退为 `div` + `plain_text` +
+`text_color: "grey"`，避免 Feishu schema 2.0 不支持 HTML 标签导致的渲染问题。
+与 cc-connect 的样式保持一致。
+
+### Fixed: 进度卡片顶部三重 hr 分隔线
+
+截断提示 banner 后多余的 `hr` 元素与自动分隔逻辑叠加，导致卡片顶部出现三条
+连续分隔线。移除手动 `hr` 追加，由分隔逻辑统一处理。
+
 ## v1.1.1 (2026-05-04)
 
 ### Fixed: 进度卡片引用回复提取只返回 `---`
