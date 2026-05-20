@@ -120,6 +120,8 @@ ln -s ~/.hermes/plugins/feishu-card-progress ~/.hermes/profiles/<your-profile>/p
 
 其余功能全部通过插件 monkey-patching 实现，无需修改上游代码。
 
+其余功能全部通过插件 monkey-patching 实现，无需修改上游代码。
+
 详见 `skills/patch-upstream/SKILL.md`。
 
 ### 6. 重启网关
