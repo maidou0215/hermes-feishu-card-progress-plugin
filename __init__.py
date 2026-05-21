@@ -276,6 +276,7 @@ async def _patched_on_processing_start(self, event) -> None:
 
     # Store references for cross-thread reasoning interception
     self._current_chat_id = event.source.chat_id
+    self._reply_to_message_id = getattr(event, "message_id", None)
     _adapter_ref = self
     try:
         _event_loop_ref = asyncio.get_running_loop()
@@ -301,6 +302,11 @@ async def _patched_send(self, chat_id, content, reply_to=None, metadata=None):
     if isinstance(content, str) and _is_progress_text(content):
         handler = _get_card_handler(self)
         entries = _parse_progress_text(content)
+
+        # Suppress clarify progress — Hermes already sends the question directly.
+        if all(name == "clarify" for name, _ in entries):
+            from gateway.platforms.base import SendResult
+            return SendResult(success=True)
 
         # First progress message — use on_tool_started (append + create card)
         card_id = None

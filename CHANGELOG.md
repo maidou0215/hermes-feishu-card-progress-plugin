@@ -1,32 +1,15 @@
 # Changelog
 
-## v1.2.1 (2026-05-20)
+## v1.2.0 (2026-05-21)
 
-### Fixed: 绿色 Completed 头部误加到所有消息
+### Fixed
+- 移除 card_handler 中重复的 `hr` 分隔线（truncated banner 与 loop 各加一条导致双重分隔）
+- 抑制 clarify 工具的重复进度消息（Hermes 已直接发送问题，progress callback 会产生重复）
 
-v1.2.0 将 `header: {Hermes · Completed, green}` 硬编码到 `_build_outbound_payload`，
-导致每条 markdown 回复（包括普通对话）都显示绿色头部。改为仅在 chat 有活跃进度卡片时
-才给最终回复添加绿色头部。
-
-### Fixed: 引用回复自动创建话题
-
-Hermes 上游使用 `root_id` 作为 `thread_id` 的回退值，导致每次引用回复都在群聊中
-自动创建话题。插件新增 monkey-patch `_on_message_event`，在消息处理前将
-`message.root_id` 置为 `None`，不再需要手动修改 `feishu.py`，且 Hermes 更新后
-不会复发。
-
-## v1.2.0 (2026-05-09)
-
-### Changed: Thinking 渲染回退
-
-Thinking 条目渲染从 markdown `<text_tag>` 回退为 `div` + `plain_text` +
-`text_color: "grey"`，避免 Feishu schema 2.0 不支持 HTML 标签导致的渲染问题。
-与 cc-connect 的样式保持一致。
-
-### Fixed: 进度卡片顶部三重 hr 分隔线
-
-截断提示 banner 后多余的 `hr` 元素与自动分隔逻辑叠加，导致卡片顶部出现三条
-连续分隔线。移除手动 `hr` 追加，由分隔逻辑统一处理。
+### Added
+- `root_id` 自动清除：monkey-patch `_on_message_event`，防止引用回复自动创建话题
+- 交互式卡片文本提取上限从 2000 提升到 5000 字符
+- 精简 README（257→~100 行）
 
 ## v1.1.1 (2026-05-04)
 

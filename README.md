@@ -43,7 +43,6 @@ hermes gateway restart
 | 环境变量 | 默认值 | 说明 |
 |----------|--------|------|
 | `FEISHU_PROGRESS_STYLE` | — | 设为 `card` 激活插件，未设置则静默加载 |
-| `FEISHU_PROGRESS_GREEN_HEADER` | `false` | 设为 `true` 给有进度卡片的最终回复加绿色 "Hermes · Completed" 头部 |
 
 ## 上游更新
 
@@ -66,9 +65,9 @@ grep -n 'reply_to_text\[:500\]' gateway/run.py   # 应无结果
 | `on_processing_start` | 清理遗留卡片，重置状态 |
 | `on_processing_complete` | 完成卡片（绿/红 header + 页脚） |
 | `_on_message_event` | 清除 `root_id`，防止引用回复自动创建话题 |
-| `send()` | 拦截进度消息 → 创建卡片；标记最终回复 |
+| `send()` | 拦截进度消息 → 创建卡片；抑制 clarify 重复 |
 | `edit_message()` | 拦截进度更新 → PATCH 卡片 |
-| `_build_outbound_payload` | Schema 2.0 卡片渲染 + 可选绿色头部 |
+| `_build_outbound_payload` | Schema 2.0 卡片渲染 |
 | `_build_get_message_request` | 增加 `card_msg_content_type=raw_card_content` 参数 |
 | `_extract_text_from_raw_content` | 解析 interactive 卡片，提取引用文本 |
 | `Agent.__setattr__` | 包装 `tool_progress_callback`，路由 reasoning 事件 |
@@ -90,6 +89,6 @@ grep -n 'reply_to_text\[:500\]' gateway/run.py   # 应无结果
 - `lark_oapi` SDK
 - 飞书平台已配置（`FEISHU_APP_ID` / `FEISHU_APP_SECRET`）
 
-## 许
+## 许可
 
 MIT
