@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.3.0 (2026-05-23)
+
+### Added
+- 最终回复 retroactive header patch：处理完成后自动给最终回复卡片添加 turquoise `Hermes · Response` header，与进度状态卡片（green Completed / red Failed）明确区分
+- `card_handler.py` 新增 `_finalize_response_card` 方法：通过 Patch API 给已发送的最终回复消息加 header
+- `__init__.py` 新增 `track_response_message` + `track_response_payload` 追踪机制，记录最后一个 interactive payload 和 message_id
+
+### Changed
+- 移除 `_green_header_enabled` / `FEISHU_PROGRESS_GREEN_HEADER` 配置项（不再需要）
+- 移除 `_pending_completed_chat` 全局变量
+- `_build_outbound_payload` 不再在发送时加 header，改由 `on_processing_complete` 统一 retroactively patch
+- 上游补丁从 2 处减为 1 处（仅 `feishu.py` root_id 剥离，`run.py` 补丁已由上游合并）
+
+### Fixed
+- 流式回复多条消息都带 Completed header 的问题：之前每个 send 都会检查 `_active_progress_cards` 并加 header，导致中间文本片段也带上了绿色状态头
+
 ## v1.2.0 (2026-05-21)
 
 ### Fixed

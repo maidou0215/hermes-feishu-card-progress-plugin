@@ -248,7 +248,7 @@ def _get_card_handler(adapter) -> Optional[FeishuCardHandler]:
     """Return (and lazy-create) the card handler for this adapter."""
     handler = getattr(adapter, "_card_handler_instance", None)
     if handler is None:
-        handler = FeishuCardHandler(adapter)
+        handler = FeishuCardHandler(adapter, response_header=_response_header_enabled)
         adapter._card_handler_instance = handler
     return handler
 
@@ -262,8 +262,7 @@ def _get_card_handler(adapter) -> Optional[FeishuCardHandler]:
 # schedule card updates via asyncio.run_coroutine_threadsafe.
 _adapter_ref: Any = None       # FeishuAdapter instance (set per-request)
 _event_loop_ref: Any = None    # Gateway event loop   (set per-request)
-_pending_completed_chat: str = ""  # chat_id awaiting final response with green header
-_green_header_enabled: bool = False  # set from env in register()
+_response_header_enabled: bool = True  # set from env in register()
 
 
 # ---------------------------------------------------------------------------
@@ -335,13 +334,16 @@ async def _patched_send(self, chat_id, content, reply_to=None, metadata=None):
         if _last_reasoning_text and content.startswith(_last_reasoning_text):
             content = content[len(_last_reasoning_text):].strip()
 
-    # If this chat has an active progress card, the final response gets a green header.
-    global _pending_completed_chat
+    # Track the first response message for this chat (used later to add header).
     handler = _get_card_handler(self)
-    if chat_id and chat_id in handler._active_progress_cards:
-        _pending_completed_chat = chat_id
+    has_active_card = chat_id and chat_id in handler._active_progress_cards
 
-    return await _orig_send(self, chat_id, content, reply_to=reply_to, metadata=metadata)
+    result = await _orig_send(self, chat_id, content, reply_to=reply_to, metadata=metadata)
+
+    if has_active_card and result and getattr(result, "message_id", None):
+        handler.track_response_message(chat_id, result.message_id)
+
+    return result
 
 
 async def _patched_edit_message(self, chat_id, message_id, content, *, finalize=False):
@@ -393,19 +395,17 @@ def _patched_build_outbound_payload(self, content: str) -> tuple:
         if not elements:
             elements = [{"tag": "markdown", "content": content}]
 
-        global _pending_completed_chat
         card: dict = {
             "schema": "2.0",
             "config": {"wide_screen_mode": True},
             "body": {"elements": elements},
         }
-        if _green_header_enabled and _pending_completed_chat:
-            card["header"] = {
-                "title": {"tag": "plain_text", "content": "Hermes · Completed"},
-                "template": "green",
-            }
-            _pending_completed_chat = ""
         payload = json.dumps(card, ensure_ascii=False)
+        # Track the last interactive payload for this chat (used to add header later)
+        handler = _get_card_handler(self)
+        chat_id = getattr(self, "_current_chat_id", None)
+        if chat_id and chat_id in handler._active_progress_cards:
+            handler.track_response_payload(chat_id, payload)
         logger.info(
             "[Card] build_outbound_payload: format=interactive "
             "content_len=%d payload_len=%d elements=%d preview=%.80s",
@@ -495,7 +495,7 @@ def register(ctx) -> None:
     """Monkey-patch FeishuAdapter + Agent to add interactive card progress."""
     global _orig_on_processing_start, _orig_on_processing_complete
     global _orig_send, _orig_edit_message, _orig_build_outbound_payload
-    global _orig_agent_setattr, _green_header_enabled
+    global _orig_agent_setattr, _response_header_enabled
 
     # Only activate when explicitly enabled
     style = os.environ.get("FEISHU_PROGRESS_STYLE", "").lower()
@@ -504,8 +504,8 @@ def register(ctx) -> None:
                     "(set FEISHU_PROGRESS_STYLE=card to activate)")
         return
 
-    _green_header_enabled = os.environ.get(
-        "FEISHU_PROGRESS_GREEN_HEADER", ""
+    _response_header_enabled = os.environ.get(
+        "FEISHU_PROGRESS_RESPONSE_HEADER", "true"
     ).lower() in ("true", "1", "yes")
 
     try:

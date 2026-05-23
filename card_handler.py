@@ -83,13 +83,16 @@ class FeishuCardHandler:
     through it.
     """
 
-    def __init__(self, adapter: Any) -> None:
+    def __init__(self, adapter: Any, *, response_header: bool = True) -> None:
         self._a = adapter
+        self._response_header = response_header
         self._active_progress_cards: Dict[str, str] = {}    # chat_id → card_msg_id
         self._progress_entries: Dict[str, List[Dict]] = {}  # chat_id → [entries]
         self._completed_chats: set = set()                   # chat_ids that finished
         self._stale_cards: Dict[str, str] = {}               # orphaned cards from previous run
         self._stale_cleanup_done = False
+        self._first_response_ids: Dict[str, str] = {}        # chat_id → last response msg_id
+        self._last_response_payloads: Dict[str, str] = {}    # chat_id → last interactive payload
         self._load_stale_cards()
 
     @property
@@ -146,30 +149,24 @@ class FeishuCardHandler:
 
     async def on_processing_start(self, event: Any) -> None:
         a = self._a
-        logger.info("[Card] on_processing_start: chat_id=%s", event.source.chat_id)
+        chat_id = event.source.chat_id
+        logger.info("[Card] on_processing_start: chat_id=%s", chat_id)
         await self._cleanup_stale_cards()
 
-        message_id = event.message_id
-        if not message_id:
-            return
-
-        chat_id = event.source.chat_id
         self._completed_chats.discard(chat_id)
         self._active_progress_cards.pop(chat_id, None)
         self._progress_entries.pop(chat_id, None)
+        self._first_response_ids.pop(chat_id, None)
+        self._last_response_payloads.pop(chat_id, None)
 
     async def on_processing_complete(self, event: Any, outcome: Any) -> None:
         a = self._a
-        logger.info("[Card] on_processing_complete: outcome=%s chat_id=%s",
-                     outcome, event.source.chat_id)
-
-        message_id = event.message_id
-        if not message_id:
-            return
-
         chat_id = event.source.chat_id
+        logger.info("[Card] on_processing_complete: outcome=%s chat_id=%s",
+                     outcome, chat_id)
         self._completed_chats.add(chat_id)
 
+        from gateway.platforms.base import ProcessingOutcome
         active_card_id = self._active_progress_cards.get(chat_id)
         entries = self._progress_entries.get(chat_id, [])
 
@@ -179,7 +176,6 @@ class FeishuCardHandler:
                 logger.info("[Card] Deleting empty progress card (no tool entries)")
                 await self._delete_message(active_card_id)
             else:
-                from gateway.platforms.base import ProcessingOutcome
                 if outcome is ProcessingOutcome.FAILURE:
                     await self._update_progress_card_failed(active_card_id, chat_id)
                 else:
@@ -188,6 +184,11 @@ class FeishuCardHandler:
         self._active_progress_cards.pop(chat_id, None)
         self._progress_entries.pop(chat_id, None)
         self._save_active_cards()
+
+        # Add response header to the final response message to distinguish
+        # it from the green "Completed" progress card above.
+        if self._response_header and active_card_id and outcome is not ProcessingOutcome.FAILURE:
+            await self._finalize_response_card(chat_id)
 
     # -----------------------------------------------------------------
     # Tool callbacks — called from monkey-patched adapter methods
@@ -508,6 +509,59 @@ class FeishuCardHandler:
             logger.warning("[Card] Delete card timed out (%ds)", _API_TIMEOUT)
         except Exception as exc:
             logger.warning("[Card] Failed to delete card %s: %s", message_id, exc)
+
+    # -----------------------------------------------------------------
+    # Response card finalization (indigo header on first response msg)
+    # -----------------------------------------------------------------
+
+    def track_response_message(self, chat_id: str, message_id: str) -> None:
+        """Record the last response message_id for later header patching."""
+        if message_id:
+            self._first_response_ids[chat_id] = message_id
+
+    def track_response_payload(self, chat_id: str, payload: str) -> None:
+        """Record the last interactive payload for later header patching."""
+        if payload:
+            self._last_response_payloads[chat_id] = payload
+
+    async def _finalize_response_card(self, chat_id: str) -> None:
+        """Patch the last response message with an indigo header."""
+        msg_id = self._first_response_ids.pop(chat_id, None)
+        payload = self._last_response_payloads.pop(chat_id, None)
+        logger.info("[Card] _finalize_response_card: chat=%s msg_id=%s has_payload=%s",
+                     chat_id, msg_id, bool(payload))
+        if not msg_id or not payload:
+            return
+        a = self._a
+        if not a._client:
+            return
+        try:
+            card = json.loads(payload)
+            card["header"] = {
+                "title": {"tag": "plain_text", "content": f"{self._agent_label} · Response"},
+                "template": "turquoise",
+            }
+            from lark_oapi.api.im.v1 import PatchMessageRequestBody, PatchMessageRequest
+            patch_body = (
+                PatchMessageRequestBody.builder()
+                .content(json.dumps(card, ensure_ascii=False))
+                .build()
+            )
+            patch_req = (
+                PatchMessageRequest.builder()
+                .message_id(msg_id)
+                .request_body(patch_body)
+                .build()
+            )
+            await asyncio.wait_for(
+                asyncio.to_thread(a._client.im.v1.message.patch, patch_req),
+                timeout=_API_TIMEOUT,
+            )
+            logger.info("[Card] Finalized response card %s with indigo header", msg_id)
+        except asyncio.TimeoutError:
+            logger.warning("[Card] Response card finalize timed out (%ds)", _API_TIMEOUT)
+        except Exception as exc:
+            logger.warning("[Card] Failed to finalize response card: %s", exc)
 
     # -----------------------------------------------------------------
     # Rendering helpers

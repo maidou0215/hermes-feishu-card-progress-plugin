@@ -1,7 +1,7 @@
 ---
 name: feishu-card-patch-upstream
 description: Hermes 上游更新后，为 feishu-card-progress 插件重新打补丁。在 `cd ~/.hermes/hermes-agent && git pull` 之后使用。
-version: 4.0.0
+version: 5.0.0
 author: Novence
 ---
 
@@ -10,51 +10,47 @@ author: Novence
 Hermes 源码是 git clone（`~/.hermes/hermes-agent/`，remote: `origin` → `NousResearch/hermes-agent`）。
 插件自身（`feishu-card-progress/`）是独立文件，不会冲突。
 
-**需要 2 个补丁**，其余功能全部通过插件 monkey-patching 实现。
+**需要 1 个补丁**，其余功能全部通过插件 monkey-patching 实现。
 
-## 补丁 1: run.py — 跳过 reasoning 拼接
+## 补丁: feishu.py — 剥离 root_id 防止自动创建话题
 
-**文件**: `gateway/run.py`
-**冲突风险**: 中（核心流程文件）
+**文件**: `gateway/platforms/feishu.py`
+**冲突风险**: 低（单行改动，在消息处理逻辑中）
 
-找到以下代码段（搜索 `_show_reasoning_effective` 或 `Prepend reasoning`）：
-
-```python
-            except Exception:
-                _show_reasoning_effective = getattr(self, "_show_reasoning", False)
-            if _show_reasoning_effective and response:
-```
-
-在 `except` 块和 `if` 之间插入 2 行：
+搜索 `root_id` 结合 `thread_id` 的位置，找到类似：
 
 ```python
-            # feishu-card-progress plugin handles reasoning in the card — skip prepend
-            if os.environ.get("FEISHU_PROGRESS_STYLE", "").lower() == "card":
-                _show_reasoning_effective = False
+thread_id = getattr(message, "thread_id", None) or getattr(message, "root_id", None) or None
 ```
 
-**验证**: `grep -n 'FEISHU_PROGRESS_STYLE' gateway/run.py` 应有结果。
-
-## 补丁 2: run.py — Reply chain 不截断引用内容
-
-**文件**: `gateway/run.py`
-**冲突风险**: 低（单行改动）
-
-搜索 `reply_to_text[:500]`，找到：
+以及：
 
 ```python
-            reply_snippet = event.reply_to_text[:500]
+reply_to_message_id = (
+    getattr(message, "parent_id", None)
+    or getattr(message, "upper_message_id", None)
+    or getattr(message, "root_id", None)
+    or None
+)
 ```
 
-替换为（去掉 `[:500]`）：
+去掉两处 `root_id` 引用：
 
 ```python
-            reply_snippet = event.reply_to_text
+thread_id = getattr(message, "thread_id", None) or None
 ```
 
-**原因**: 插件增强了 interactive 卡片的文本提取（通过 `card_msg_content_type=raw_card_content` API 参数），卡片内容可能很长。上游的 500 字符截断会丢失大部分内容。cc-connect 也不截断 reply chain。
+```python
+reply_to_message_id = (
+    getattr(message, "parent_id", None)
+    or getattr(message, "upper_message_id", None)
+    or None
+)
+```
 
-**验证**: `grep -n 'reply_to_text\[:500\]' gateway/run.py` 应无结果。
+**原因**: Hermes 用 `root_id` 作为 `thread_id` 的 fallback，导致引用回复时自动创建话题。插件也通过 monkey-patch `_on_message_event` 在运行时清除 root_id 作为双重保障。
+
+**验证**: `grep -n 'root_id' gateway/platforms/feishu.py | grep -i 'thread_id\|reply_to'` 应无结果。
 
 ## 补丁步骤
 
@@ -65,8 +61,8 @@ cd ~/.hermes/hermes-agent
 git pull origin main
 
 # 2. 检查补丁是否还在
-grep -n 'FEISHU_PROGRESS_STYLE' gateway/run.py          # 补丁 1
-grep -n 'reply_to_text\[:500\]' gateway/run.py           # 补丁 2（应无结果）
+grep -n 'root_id' gateway/platforms/feishu.py | grep -i 'thread_id\|reply_to'
+# 应无结果（如果补丁还在）
 
 # 3. 如果被覆盖，重新应用上面的补丁
 
@@ -74,25 +70,15 @@ grep -n 'reply_to_text\[:500\]' gateway/run.py           # 补丁 2（应无结�
 hermes gateway restart
 ```
 
-## 历史本地 patch 注意事项
-
-### root_id 自动话题创建（已由插件自动处理）
-
-之前有一个本地补丁（commit `a79b0ec46`）将 `root_id` 加入了 `thread_id` 的回退链，
-导致引用回复自动创建话题。该 patch 已于 2026-05-09 还原。
-
-**v1.2.0 起，插件通过 monkey-patch `_on_message_event` 自动清除 `root_id`**，
-不再需要手动修改 `feishu.py`，Hermes 更新后也不会复发。
-
 ## 为什么其他补丁不需要
 
 | 功能 | 为什么不需要上游补丁 |
 |------|----------------------|
-| Reasoning 提取 | 插件 monkey-patch `AIAgent._build_assistant_message` 自行提取 |
+| Reasoning 处理 | 插件 monkey-patch `AIAgent._build_assistant_message` 自行提取 + `send()` 中 fallback 剥离前缀 |
+| Reply chain 截断 | 当前 500 字符截断未造成实际问题 |
 | on_thinking 方法 | 插件直接调用 `handler.on_thinking()`，不经过 adapter 基类 |
 | 环境变量读取 | 插件直接 `os.environ.get("FEISHU_PROGRESS_STYLE")` 读取 |
-| Interactive 卡片文本提取 | 插件 monkey-patch `_build_get_message_request`（加 API 参数）和 `_extract_text_from_raw_content`（解析 `json_card` 格式） |
-| Reply chain 截断 | 补丁 2 已处理 |
-| root_id 话题创建 | 插件 monkey-patch `_on_message_event` 自动清除 root_id |
+| Interactive 卡片文本提取 | 插件 monkey-patch `_build_get_message_request` + `_extract_text_from_raw_content` |
+| 最终回复 header | `on_processing_complete` 后 retroactively patch 已发送的消息 |
 
-插件是完全自包含的，除了 run.py 这 2 个补丁外，不依赖任何上游代码修改。
+插件是完全自包含的，除了 `feishu.py` 这 1 个补丁外，不依赖任何上游代码修改。
