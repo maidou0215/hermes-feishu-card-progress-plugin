@@ -338,6 +338,34 @@ async def _patched_send(self, chat_id, content, reply_to=None, metadata=None):
     handler = _get_card_handler(self)
     has_active_card = chat_id and chat_id in handler._active_progress_cards
 
+    # Multi-table splitting: when content has >5 markdown tables, split into
+    # multiple ≤5-table chunks and send each as a separate interactive card.
+    # Only active in "split" mode; "post" mode handles this at payload level.
+    if (
+        _table_overflow_mode == "split"
+        and isinstance(content, str)
+        and _count_tables(content) > _FEISHU_MAX_TABLES
+    ):
+        chunks = _split_content_by_tables(content, _FEISHU_MAX_TABLES)
+        logger.info(
+            "[Card] Splitting %d tables into %d messages for chat %s",
+            _count_tables(content), len(chunks), chat_id,
+        )
+        last_result = None
+        for i, chunk in enumerate(chunks):
+            # Only the first chunk keeps reply_to and response header tracking
+            chunk_reply = reply_to if i == 0 else None
+            chunk_metadata = metadata if i == 0 else None
+            r = await _orig_send(
+                self, chat_id, chunk,
+                reply_to=chunk_reply, metadata=chunk_metadata,
+            )
+            if r:
+                last_result = r
+                if i == 0 and has_active_card and getattr(r, "message_id", None):
+                    handler.track_response_message(chat_id, r.message_id)
+        return last_result
+
     result = await _orig_send(self, chat_id, content, reply_to=reply_to, metadata=metadata)
 
     if has_active_card and result and getattr(result, "message_id", None):
@@ -369,6 +397,86 @@ async def _patched_edit_message(self, chat_id, message_id, content, *, finalize=
 
 
 _CODE_BLOCK_RE = re.compile(r'(```[a-z_]*\n.*?```)', re.DOTALL)
+_TABLE_SEP_RE = re.compile(r'^\s*\|[\s\-:]+\|[\s\-:|]*\|?\s*$', re.MULTILINE)
+_FEISHU_MAX_TABLES = 5
+
+
+def _count_tables(content: str) -> int:
+    """Count markdown tables by matching separator lines like |---|---|."""
+    return len(_TABLE_SEP_RE.findall(content))
+
+
+def _find_table_blocks(content: str) -> list:
+    """Return (start, end) spans for each complete markdown table block.
+
+    A table block = header line + separator line + body lines.
+    Uses _TABLE_SEP_RE to locate separators, then expands to the full block.
+    """
+    lines = content.split('\n')
+    blocks = []
+    i = 0
+    while i < len(lines):
+        if _TABLE_SEP_RE.match(lines[i]):
+            # Found separator. Walk backwards to find header.
+            header_idx = i - 1
+            while header_idx >= 0 and not lines[header_idx].strip().startswith('|'):
+                header_idx -= 1
+            if header_idx < 0 or not lines[header_idx].strip().startswith('|'):
+                i += 1
+                continue
+            # Walk forward to find all body rows
+            body_end = i + 1
+            while body_end < len(lines) and lines[body_end].strip().startswith('|'):
+                body_end += 1
+            # Compute character positions
+            start = sum(len(lines[j]) + 1 for j in range(header_idx))
+            end = sum(len(lines[j]) + 1 for j in range(body_end))
+            blocks.append((start, end))
+            i = body_end
+        else:
+            i += 1
+    return blocks
+
+
+def _split_content_by_tables(content: str, max_tables: int) -> list:
+    """Split content into chunks each containing at most *max_tables* tables.
+
+    Splits at table block boundaries.  Non-table text is attached to the
+    nearest chunk.
+    """
+    table_count = _count_tables(content)
+    if table_count <= max_tables:
+        return [content]
+
+    blocks = _find_table_blocks(content)
+    if not blocks:
+        return [content]
+
+    chunks = []
+    chunk_start = 0
+
+    for i in range(0, len(blocks), max_tables):
+        batch = blocks[i:i + max_tables]
+        first_start = batch[0][0]
+        last_end = batch[-1][1]
+
+        # Non-table text before this batch
+        text_before = content[chunk_start:first_start].strip()
+        table_text = content[first_start:last_end].strip()
+
+        chunk = f"{text_before}\n\n{table_text}".strip() if text_before else table_text
+        chunks.append(chunk)
+        chunk_start = last_end
+
+    # Trailing text after last table
+    trailing = content[chunk_start:].strip()
+    if trailing:
+        if chunks:
+            chunks[-1] = f"{chunks[-1]}\n\n{trailing}"
+        else:
+            chunks.append(trailing)
+
+    return chunks
 
 
 def _split_content_to_elements(content: str) -> list:
@@ -383,14 +491,39 @@ def _split_content_to_elements(content: str) -> list:
     return elements
 
 
+def _build_post_payload(content: str) -> tuple:
+    """Build a Feishu Post (md tag) payload — no table limit, simpler rendering."""
+    post = {
+        "zh_cn": {
+            "title": "",
+            "content": [[{"tag": "md", "content": content}]],
+        }
+    }
+    return "post", json.dumps(post, ensure_ascii=False)
+
+
 def _patched_build_outbound_payload(self, content: str) -> tuple:
     """Use interactive card (schema 2.0) for markdown content.
 
     Splits content into separate elements for code blocks and text,
     preventing code fences from swallowing rich text formatting.
-    Tables exceeding the Feishu 5-row limit are automatically paginated.
+    Multi-table splitting (>5 tables) is handled at the send level.
+    When table_overflow_mode is "post", >5 tables fall back to Post message
+    type which has no table limit (cc-connect's approach).
     """
     if _MARKDOWN_HINT_RE.search(content):
+        table_count = _count_tables(content)
+
+        # Post fallback: no table limit, single message
+        if _table_overflow_mode == "post" and table_count > _FEISHU_MAX_TABLES:
+            msg_type, payload = _build_post_payload(content)
+            logger.info(
+                "[Card] build_outbound_payload: format=%s (post fallback) "
+                "content_len=%d tables=%d preview=%.80s",
+                msg_type, len(content), table_count, content[:80],
+            )
+            return msg_type, payload
+
         elements = _split_content_to_elements(content)
         if not elements:
             elements = [{"tag": "markdown", "content": content}]
@@ -408,8 +541,8 @@ def _patched_build_outbound_payload(self, content: str) -> tuple:
             handler.track_response_payload(chat_id, payload)
         logger.info(
             "[Card] build_outbound_payload: format=interactive "
-            "content_len=%d payload_len=%d elements=%d preview=%.80s",
-            len(content), len(payload), len(elements), content[:80],
+            "content_len=%d payload_len=%d elements=%d tables=%d preview=%.80s",
+            len(content), len(payload), len(elements), table_count, content[:80],
         )
         return "interactive", payload
 
@@ -485,6 +618,7 @@ _orig_send = None
 _orig_edit_message = None
 _orig_build_outbound_payload = None
 _orig_agent_setattr = None
+_table_overflow_mode = "split"  # "split" (multi-card) or "post" (Feishu Post fallback)
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +629,7 @@ def register(ctx) -> None:
     """Monkey-patch FeishuAdapter + Agent to add interactive card progress."""
     global _orig_on_processing_start, _orig_on_processing_complete
     global _orig_send, _orig_edit_message, _orig_build_outbound_payload
-    global _orig_agent_setattr, _response_header_enabled
+    global _orig_agent_setattr, _response_header_enabled, _table_overflow_mode
 
     # Only activate when explicitly enabled
     style = os.environ.get("FEISHU_PROGRESS_STYLE", "").lower()
@@ -507,6 +641,12 @@ def register(ctx) -> None:
     _response_header_enabled = os.environ.get(
         "FEISHU_PROGRESS_RESPONSE_HEADER", "true"
     ).lower() in ("true", "1", "yes")
+
+    _table_overflow_mode = os.environ.get(
+        "FEISHU_PROGRESS_TABLE_OVERFLOW", "split"
+    ).lower()
+    if _table_overflow_mode not in ("split", "post"):
+        _table_overflow_mode = "split"
 
     try:
         from gateway.platforms.feishu import FeishuAdapter
