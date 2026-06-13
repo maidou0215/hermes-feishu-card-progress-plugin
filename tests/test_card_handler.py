@@ -186,6 +186,41 @@ class TestFooterRender(unittest.TestCase):
         # 0 tokens — we still render "0" so the user sees the turn was free.
         self.assertIn("0", rendered)
 
+    def test_footer_with_bash_calls(self):
+        """Footer renders total tool count plus a Bash-specific breakdown."""
+        cls, _ = self._load_handler_cls()
+        elements = cls._build_footer_elements(
+            duration=4.2, model="claude-sonnet-4-6",
+            input_tokens=1200, output_tokens=320,
+            tool_calls=5, bash_calls=3,
+        )
+        rendered = json.dumps(elements, ensure_ascii=False)
+        self.assertIn("5 calls", rendered)
+        self.assertIn("bash ×3", rendered)
+
+    def test_footer_with_only_non_bash_tools(self):
+        """Footer renders total calls without Bash breakdown when bash_calls=0."""
+        cls, _ = self._load_handler_cls()
+        elements = cls._build_footer_elements(
+            duration=2.0, model="m",
+            input_tokens=10, output_tokens=20,
+            tool_calls=4, bash_calls=0,
+        )
+        rendered = json.dumps(elements, ensure_ascii=False)
+        self.assertIn("4 calls", rendered)
+        self.assertNotIn("bash", rendered)
+
+    def test_footer_omits_zero_tool_calls(self):
+        """Footer omits the tool-calls segment entirely when tool_calls=0."""
+        cls, _ = self._load_handler_cls()
+        elements = cls._build_footer_elements(
+            duration=1.0, model="m",
+            input_tokens=10, output_tokens=20,
+            tool_calls=0, bash_calls=0,
+        )
+        rendered = json.dumps(elements, ensure_ascii=False)
+        self.assertNotIn("calls", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

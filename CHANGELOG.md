@@ -4,9 +4,10 @@
 
 ### feat: runtime stats footer on response cards
 
-- 最终 Response 卡片底部新增运行统计 footer（duration / model / input_tokens / output_tokens）
-- 示例：`⏱ 4.2s · 🤖 claude-sonnet-4-6 · ↑1.2k ↓320 tokens`
+- 最终 Response 卡片底部新增运行统计 footer（duration / model / tool_calls / bash_calls / input_tokens / output_tokens）
+- 示例：`⏱ 4.2s · 🤖 claude-sonnet-4-6 · 🔧 5 calls · bash ×3 · ↑1.2k ↓320 tokens`
 - 通过 `_patched_agent_setattr` 捕获 AIAgent 实例，在 `on_processing_complete` 读取 `session_input_tokens` / `session_output_tokens` / `model`
+- 工具调用次数从 `_progress_entries` 计算，bash-family（bash/shell/terminal/run_shell_command）单独拆分
 - Duration 使用 `time.monotonic()` 在 `on_processing_start` / `on_processing_complete` 之间计算
 - Footer 数据缓存在 `_pending_footer`，由 `_finalize_response_card` 渲染到 Response 卡片底部（不是中间的 Completed 状态卡）
 

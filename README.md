@@ -17,7 +17,7 @@ Hermes 飞书插件 — 工具执行进度卡片 + Schema 2.0 响应渲染。
 - **表格溢出处理** — 超过 5 个 markdown 表格时自动分片（split）或回退 Post 消息（post），避免飞书 ErrCode 11310
 - **Reply Chain 增强** — 引用卡片消息时提取实际文本内容，不再显示 `[Interactive message]`
 - **root_id 自动清除** — 防止引用回复自动创建话题，Hermes 更新后不会复发
-- **运行统计 Footer** — 最终回复卡片自动展示耗时、模型、token 用量（如 `⏱ 4.2s · 🤖 claude-sonnet-4-6 · ↑1.2k ↓320 tokens`）
+- **运行统计 Footer** — 最终回复卡片自动展示耗时、模型、工具调用次数、token 用量（如 `⏱ 4.2s · 🤖 claude-sonnet-4-6 · 🔧 5 calls · bash ×3 · ↑1.2k ↓320 tokens`）
 - **`<think>` 标签兜底** — DeepSeek/Qwen/Moonshot 等模型偶发泄漏的 `<think>`/`<thinking>` 标签自动剥离
 - **PATCH 并发安全** — per-chat 锁 + 序号 stale-drop，避免 tool 密集场景下旧快照覆盖新内容
 - **重启容错** — 活跃卡片 ID 持久化，重启后自动清理遗留卡片

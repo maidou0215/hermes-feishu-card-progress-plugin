@@ -216,6 +216,17 @@ class FeishuCardHandler:
         active_card_id = self._active_progress_cards.get(chat_id)
         entries = self._progress_entries.get(chat_id, [])
 
+        # Count tool invocations for the footer.  Bash-family tools
+        # (bash/shell/terminal/run_shell_command) are broken out so users
+        # can see shell activity at a glance.
+        all_tools = [e for e in entries if e.get("type") == "tool_use"]
+        tool_calls = len(all_tools)
+        bash_calls = sum(
+            1 for e in all_tools
+            if (e.get("tool", "") or "").lower()
+            in ("bash", "shell", "run_shell_command", "terminal")
+        )
+
         # Stage footer data for the Response card finalize step.  Only stage
         # when we have a real chance to render it — i.e. a successful turn
         # where the response card finalize will actually fire.
@@ -225,6 +236,8 @@ class FeishuCardHandler:
                 "model": model,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                "tool_calls": tool_calls,
+                "bash_calls": bash_calls,
             }
 
         if active_card_id:
@@ -678,6 +691,8 @@ class FeishuCardHandler:
         model: Optional[str],
         input_tokens: Optional[int],
         output_tokens: Optional[int],
+        tool_calls: Optional[int] = None,
+        bash_calls: Optional[int] = None,
     ) -> List[Dict]:
         """Build card elements for a runtime-stats footer.
 
@@ -689,6 +704,11 @@ class FeishuCardHandler:
             parts.append(f"⏱ {duration:.1f}s")
         if model:
             parts.append(f"\U0001f916 {model}")
+        if tool_calls is not None and tool_calls > 0:
+            if bash_calls:
+                parts.append(f"\U0001f527 {tool_calls} calls · bash ×{bash_calls}")
+            else:
+                parts.append(f"\U0001f527 {tool_calls} calls")
         in_h = _humanize_tokens(input_tokens)
         out_h = _humanize_tokens(output_tokens)
         if in_h or out_h:
