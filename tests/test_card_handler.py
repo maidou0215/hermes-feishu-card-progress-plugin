@@ -18,6 +18,8 @@ os.environ.pop("FEISHU_PROGRESS_STYLE", None)
 # The plugin directory is named `feishu-card-progress` (hyphen), which is not
 # a valid Python identifier.  Load __init__.py via importlib to test its
 # pure functions without triggering register().
+import asyncio
+from unittest.mock import MagicMock, AsyncMock, patch
 import importlib.util
 
 _spec = importlib.util.spec_from_file_location(
@@ -74,6 +76,62 @@ class TestStripThinkTags(unittest.TestCase):
     def test_multiple_blocks(self):
         text = "<think" + ">a</think" + ">mid<think" + ">b</think" + ">end"
         self.assertEqual(_strip_think_tags(text), "midend")
+
+
+class TestPatchStaleDrop(unittest.TestCase):
+    """Verify that out-of-order patches are dropped to prevent the
+    'old snapshot overwrites new content' bug (mirrors issue #31
+    from hermes-feishu-streaming-card)."""
+
+    def _make_handler(self):
+        # Load card_handler.py from file (directory name has a hyphen).
+        spec = importlib.util.spec_from_file_location(
+            "card_handler_under_test",
+            _REPO_ROOT / "card_handler.py",
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        adapter = MagicMock()
+        adapter._client = MagicMock()
+        handler = mod.FeishuCardHandler(adapter)
+        return handler, mod
+
+    def test_seq_monotonic_per_chat(self):
+        handler, _ = self._make_handler()
+        s1 = handler._bump_seq("c1")
+        s2 = handler._bump_seq("c1")
+        s3 = handler._bump_seq("c2")
+        self.assertEqual((s1, s2, s3), (1, 2, 1))
+
+    def test_locks_are_per_chat(self):
+        handler, _ = self._make_handler()
+        l1 = handler._get_patch_lock("c1")
+        l2 = handler._get_patch_lock("c2")
+        l1b = handler._get_patch_lock("c1")
+        self.assertIsNot(l1, l2)
+        self.assertIs(l1, l1b)
+
+    def test_stale_patch_dropped(self):
+        """A patch with seq < last_sent_seq is dropped without calling Feishu."""
+        handler, mod = self._make_handler()
+        handler._last_sent_seq["c1"] = 5
+
+        async def run():
+            # Use the REAL _patch_progress_card to verify drop logic.
+            real_patch = mod.FeishuCardHandler._patch_progress_card.__get__(handler)
+            with patch.object(
+                handler, "_render_progress_entries", return_value=[]
+            ), patch(
+                "asyncio.wait_for", new=AsyncMock()
+            ), patch(
+                "asyncio.to_thread", new=MagicMock()
+            ):
+                # Patch should be dropped because seq=3 < last_sent=5.
+                await real_patch("msg_id", "c1", [], seq=3)
+
+        asyncio.run(run())
+        # last_sent_seq should remain 5 (not downgraded to 3).
+        self.assertEqual(handler._last_sent_seq.get("c1"), 5)
 
 
 if __name__ == "__main__":

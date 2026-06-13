@@ -93,11 +93,29 @@ class FeishuCardHandler:
         self._stale_cleanup_done = False
         self._first_response_ids: Dict[str, str] = {}        # chat_id → last response msg_id
         self._last_response_payloads: Dict[str, str] = {}    # chat_id → last interactive payload
+        self._turn_start_times: Dict[str, float] = {}      # chat_id → monotonic start
+        self._patch_locks: Dict[str, "asyncio.Lock"] = {}  # chat_id → PATCH serialization lock
+        self._progress_seq: Dict[str, int] = {}            # chat_id → monotonic entry counter
+        self._last_sent_seq: Dict[str, int] = {}           # chat_id → last PATCH seq actually sent
         self._load_stale_cards()
 
     @property
     def _agent_label(self) -> str:
         return "Hermes"
+
+    def _bump_seq(self, chat_id: str) -> int:
+        """Return the next monotonic seq for this chat. Call every time
+        `_progress_entries[chat_id]` is mutated so patches can be ordered."""
+        seq = self._progress_seq.get(chat_id, 0) + 1
+        self._progress_seq[chat_id] = seq
+        return seq
+
+    def _get_patch_lock(self, chat_id: str) -> "asyncio.Lock":
+        lock = self._patch_locks.get(chat_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._patch_locks[chat_id] = lock
+        return lock
 
     # -----------------------------------------------------------------
     # Card state persistence (survives gateway restarts)
@@ -212,6 +230,7 @@ class FeishuCardHandler:
             "tool": tool_name,
             "preview": (preview or "")[:_MAX_PREVIEW],
         })
+        seq = self._bump_seq(chat_id)
 
         active_card_id = self._active_progress_cards.get(chat_id)
         if not active_card_id:
@@ -224,7 +243,7 @@ class FeishuCardHandler:
             else:
                 return None
 
-        await self._patch_progress_card(active_card_id, chat_id, entries)
+        await self._patch_progress_card(active_card_id, chat_id, entries, seq=seq)
         return active_card_id
 
     async def update_entries(
@@ -252,11 +271,12 @@ class FeishuCardHandler:
             }
             for name, preview in tool_entries
         ]
+        seq = self._bump_seq(chat_id)
 
         active_card_id = self._active_progress_cards.get(chat_id)
         if active_card_id:
             await self._patch_progress_card(
-                active_card_id, chat_id, self._progress_entries[chat_id]
+                active_card_id, chat_id, self._progress_entries[chat_id], seq=seq
             )
 
     async def on_thinking(self, chat_id: str, text: str) -> None:
@@ -275,11 +295,12 @@ class FeishuCardHandler:
             "type": "thinking",
             "text": text.strip()[:500],
         })
+        seq = self._bump_seq(chat_id)
 
         # Only patch if a card already exists (created by on_tool_started)
         active_card_id = self._active_progress_cards.get(chat_id)
         if active_card_id:
-            await self._patch_progress_card(active_card_id, chat_id, entries)
+            await self._patch_progress_card(active_card_id, chat_id, entries, seq=seq)
 
     # -----------------------------------------------------------------
     # Card creation / patching / finalization
@@ -347,45 +368,66 @@ class FeishuCardHandler:
             return None
 
     async def _patch_progress_card(
-        self, card_message_id: str, chat_id: str, entries: List[Dict]
+        self, card_message_id: str, chat_id: str, entries: List[Dict],
+        *, seq: Optional[int] = None,
     ) -> None:
+        """PATCH the card with the given entries.
+
+        Serialized per-chat via ``_get_patch_lock`` so concurrent
+        callbacks don't race.  If *seq* is provided and is older than
+        the last PATCH actually sent to this chat, the call is dropped
+        — prevents an older snapshot from overwriting newer content
+        when network reordering happens.
+        """
         a = self._a
         if not a._client:
             return
-        try:
-            trimmed, truncated = self._trim_entries(entries)
-            elements = self._render_progress_entries(trimmed, truncated)
-            card = {
-                "schema": "2.0",
-                "config": {"wide_screen_mode": True},
-                "header": {
-                    "title": {"tag": "plain_text", "content": f"{self._agent_label} · Running"},
-                    "template": "blue",
-                },
-                "body": {"elements": elements},
-            }
-            card_json = json.dumps(card, ensure_ascii=False)
-            logger.debug("[Card] Patching card %s (%d entries)", card_message_id, len(entries))
-            from lark_oapi.api.im.v1 import PatchMessageRequestBody, PatchMessageRequest
-            body = (
-                PatchMessageRequestBody.builder()
-                .content(card_json)
-                .build()
-            )
-            request = (
-                PatchMessageRequest.builder()
-                .message_id(card_message_id)
-                .request_body(body)
-                .build()
-            )
-            await asyncio.wait_for(
-                asyncio.to_thread(a._client.im.v1.message.patch, request),
-                timeout=_API_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            logger.warning("[Card] Progress card patch timed out (%ds)", _API_TIMEOUT)
-        except Exception as exc:
-            logger.warning("[Card] Progress card patch error: %s", exc)
+        lock = self._get_patch_lock(chat_id)
+        async with lock:
+            if seq is not None and seq < self._last_sent_seq.get(chat_id, 0):
+                logger.debug(
+                    "[Card] Dropping stale patch seq=%d (last_sent=%d) for %s",
+                    seq, self._last_sent_seq.get(chat_id, 0), chat_id,
+                )
+                return
+            try:
+                trimmed, truncated = self._trim_entries(entries)
+                elements = self._render_progress_entries(trimmed, truncated)
+                card = {
+                    "schema": "2.0",
+                    "config": {"wide_screen_mode": True},
+                    "header": {
+                        "title": {"tag": "plain_text",
+                                  "content": f"{self._agent_label} · Running"},
+                        "template": "blue",
+                    },
+                    "body": {"elements": elements},
+                }
+                card_json = json.dumps(card, ensure_ascii=False)
+                logger.debug("[Card] Patching card %s (%d entries, seq=%s)",
+                             card_message_id, len(entries), seq)
+                from lark_oapi.api.im.v1 import PatchMessageRequestBody, PatchMessageRequest
+                body = (
+                    PatchMessageRequestBody.builder()
+                    .content(card_json)
+                    .build()
+                )
+                request = (
+                    PatchMessageRequest.builder()
+                    .message_id(card_message_id)
+                    .request_body(body)
+                    .build()
+                )
+                await asyncio.wait_for(
+                    asyncio.to_thread(a._client.im.v1.message.patch, request),
+                    timeout=_API_TIMEOUT,
+                )
+                if seq is not None:
+                    self._last_sent_seq[chat_id] = seq
+            except asyncio.TimeoutError:
+                logger.warning("[Card] Progress card patch timed out (%ds)", _API_TIMEOUT)
+            except Exception as exc:
+                logger.warning("[Card] Progress card patch error: %s", exc)
 
     async def _update_progress_card_completed(
         self, card_message_id: str, chat_id: str
@@ -393,51 +435,53 @@ class FeishuCardHandler:
         a = self._a
         if not a._client:
             return
-        try:
-            entries = self._progress_entries.get(chat_id, [])
-            trimmed, truncated = self._trim_entries(entries)
-            elements = self._render_progress_entries(trimmed, truncated)
-            elements.append({"tag": "hr"})
-            elements.append({
-                "tag": "div",
-                "text": {
-                    "tag": "plain_text",
-                    "content": "This progress card is no longer updating. "
-                               "Full response is in the next message.",
-                    "text_size": "notation",
-                    "text_color": "grey",
-                },
-            })
-            card = {
-                "schema": "2.0",
-                "config": {"wide_screen_mode": True},
-                "header": {
-                    "title": {"tag": "plain_text",
-                              "content": f"{self._agent_label} · Completed"},
-                    "template": "green",
-                },
-                "body": {"elements": elements},
-            }
-            from lark_oapi.api.im.v1 import PatchMessageRequestBody, PatchMessageRequest
-            body = (
-                PatchMessageRequestBody.builder()
-                .content(json.dumps(card, ensure_ascii=False))
-                .build()
-            )
-            request = (
-                PatchMessageRequest.builder()
-                .message_id(card_message_id)
-                .request_body(body)
-                .build()
-            )
-            await asyncio.wait_for(
-                asyncio.to_thread(a._client.im.v1.message.patch, request),
-                timeout=_API_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            logger.warning("[Card] Completed card update timed out (%ds)", _API_TIMEOUT)
-        except Exception as exc:
-            logger.warning("[Card] Completed card update error: %s", exc)
+        async with self._get_patch_lock(chat_id):
+            try:
+                entries = self._progress_entries.get(chat_id, [])
+                trimmed, truncated = self._trim_entries(entries)
+                elements = self._render_progress_entries(trimmed, truncated)
+                elements.append({"tag": "hr"})
+                elements.append({
+                    "tag": "div",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "This progress card is no longer updating. "
+                                   "Full response is in the next message.",
+                        "text_size": "notation",
+                        "text_color": "grey",
+                    },
+                })
+                card = {
+                    "schema": "2.0",
+                    "config": {"wide_screen_mode": True},
+                    "header": {
+                        "title": {"tag": "plain_text",
+                                  "content": f"{self._agent_label} · Completed"},
+                        "template": "green",
+                    },
+                    "body": {"elements": elements},
+                }
+                from lark_oapi.api.im.v1 import PatchMessageRequestBody, PatchMessageRequest
+                body = (
+                    PatchMessageRequestBody.builder()
+                    .content(json.dumps(card, ensure_ascii=False))
+                    .build()
+                )
+                request = (
+                    PatchMessageRequest.builder()
+                    .message_id(card_message_id)
+                    .request_body(body)
+                    .build()
+                )
+                await asyncio.wait_for(
+                    asyncio.to_thread(a._client.im.v1.message.patch, request),
+                    timeout=_API_TIMEOUT,
+                )
+                self._last_sent_seq[chat_id] = self._progress_seq.get(chat_id, 0)
+            except asyncio.TimeoutError:
+                logger.warning("[Card] Completed card update timed out (%ds)", _API_TIMEOUT)
+            except Exception as exc:
+                logger.warning("[Card] Completed card update error: %s", exc)
 
     async def _update_progress_card_failed(
         self, card_message_id: str, chat_id: str
@@ -445,52 +489,54 @@ class FeishuCardHandler:
         a = self._a
         if not a._client:
             return
-        try:
-            card = {
-                "schema": "2.0",
-                "config": {"wide_screen_mode": True},
-                "header": {
-                    "title": {"tag": "plain_text",
-                              "content": f"{self._agent_label} · Failed"},
-                    "template": "red",
-                },
-                "body": {
-                    "elements": [
-                        {"tag": "markdown", "content": "<text_tag color='red'>Error</text_tag>\n\u274c Processing failed. Please retry."},
-                        {"tag": "hr"},
-                        {
-                            "tag": "div",
-                            "text": {
-                                "tag": "plain_text",
-                                "content": "This progress card has stopped (failed). "
-                                           "See the next message for details.",
-                                "text_size": "notation",
-                                "text_color": "grey",
+        async with self._get_patch_lock(chat_id):
+            try:
+                card = {
+                    "schema": "2.0",
+                    "config": {"wide_screen_mode": True},
+                    "header": {
+                        "title": {"tag": "plain_text",
+                                  "content": f"{self._agent_label} · Failed"},
+                        "template": "red",
+                    },
+                    "body": {
+                        "elements": [
+                            {"tag": "markdown", "content": "<text_tag color='red'>Error</text_tag>\n\u274c Processing failed. Please retry."},
+                            {"tag": "hr"},
+                            {
+                                "tag": "div",
+                                "text": {
+                                    "tag": "plain_text",
+                                    "content": "This progress card has stopped (failed). "
+                                               "See the next message for details.",
+                                    "text_size": "notation",
+                                    "text_color": "grey",
+                                },
                             },
-                        },
-                    ],
-                },
-            }
-            from lark_oapi.api.im.v1 import PatchMessageRequestBody, PatchMessageRequest
-            body = (
-                PatchMessageRequestBody.builder()
-                .content(json.dumps(card, ensure_ascii=False))
-                .build()
-            )
-            request = (
-                PatchMessageRequest.builder()
-                .message_id(card_message_id)
-                .request_body(body)
-                .build()
-            )
-            await asyncio.wait_for(
-                asyncio.to_thread(a._client.im.v1.message.patch, request),
-                timeout=_API_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            logger.warning("[Card] Failed card update timed out (%ds)", _API_TIMEOUT)
-        except Exception as exc:
-            logger.warning("[Card] Failed card update error: %s", exc)
+                        ],
+                    },
+                }
+                from lark_oapi.api.im.v1 import PatchMessageRequestBody, PatchMessageRequest
+                body = (
+                    PatchMessageRequestBody.builder()
+                    .content(json.dumps(card, ensure_ascii=False))
+                    .build()
+                )
+                request = (
+                    PatchMessageRequest.builder()
+                    .message_id(card_message_id)
+                    .request_body(body)
+                    .build()
+                )
+                await asyncio.wait_for(
+                    asyncio.to_thread(a._client.im.v1.message.patch, request),
+                    timeout=_API_TIMEOUT,
+                )
+                self._last_sent_seq[chat_id] = self._progress_seq.get(chat_id, 0)
+            except asyncio.TimeoutError:
+                logger.warning("[Card] Failed card update timed out (%ds)", _API_TIMEOUT)
+            except Exception as exc:
+                logger.warning("[Card] Failed card update error: %s", exc)
 
     async def _delete_message(self, message_id: str) -> None:
         a = self._a
