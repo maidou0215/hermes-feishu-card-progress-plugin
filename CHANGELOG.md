@@ -1,5 +1,34 @@
 # Changelog
 
+## v1.4.0 (2026-06-13)
+
+### feat: runtime stats footer on completed cards
+
+- 完成态卡片新增运行统计 footer（duration / model / input_tokens / output_tokens）
+- 示例：`⏱ 4.2s · 🤖 claude-sonnet-4-6 · ↑1.2k ↓320 tokens`
+- 通过 `_patched_agent_setattr` 捕获 AIAgent 实例，在 `on_processing_complete` 读取 `session_input_tokens` / `session_output_tokens` / `model`
+- Duration 使用 `time.monotonic()` 在 `on_processing_start` / `on_processing_complete` 之间计算
+
+### feat: $/<thinking> tag fallback stripping
+
+- DeepSeek / Qwen / Moonshot 等模型偶发把原始 `$` 标签泄漏到最终回答文本中
+- 在 `_patched_send` 中加 `_strip_think_tags` 兜底剥离完整块和孤立标签
+- 借鉴 hermes-feishu-streaming-card 的 defensive layer
+
+### fix: per-chat PATCH serialization + stale-drop
+
+- 多线程回调并发 PATCH 同一卡片时存在内容回退竞态（旧快照后到覆盖新内容）
+- 加 per-chat `asyncio.Lock` 串行化所有 PATCH 调用
+- 加 monotonic seq counter，落后于 `last_sent_seq` 的 patch 在 lock 内被 drop
+- 完成/失败终态 PATCH 同样使用该 lock，并刷新 `last_sent_seq` 防止后续 stale patch 覆盖
+- 借鉴 hermes-feishu-streaming-card issue #31
+
+### test: stdlib unittest harness
+
+- 新增 `tests/test_card_handler.py`（stdlib `unittest`，无 pytest 依赖）
+- 覆盖 `$` 剥离（8 tests）、PATCH seq stale-drop（3 tests）、footer 渲染（3 tests）
+- 通过 `importlib` 加载 `__init__.py` / `card_handler.py`（目录名含连字符无法直接 import）
+
 ## v1.3.0 (2026-05-23)
 
 ### feat: retroactive response header, replace green-header mechanism
