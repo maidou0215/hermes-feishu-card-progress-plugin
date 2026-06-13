@@ -212,6 +212,15 @@ class FeishuCardHandler:
         output_tokens = getattr(agent, "session_output_tokens", None) if agent else None
         model = getattr(agent, "model", None) if agent else None
 
+        # Context-window occupancy from context_compressor.  Mirrors Hermes'
+        # own usage_percent = min(100, last_prompt_tokens / context_length * 100).
+        context_pct: Optional[float] = None
+        compressor = getattr(agent, "context_compressor", None) if agent else None
+        last_prompt = getattr(compressor, "last_prompt_tokens", None)
+        ctx_len = getattr(compressor, "context_length", None)
+        if last_prompt is not None and isinstance(ctx_len, (int, float)) and ctx_len > 0:
+            context_pct = min(100.0, float(last_prompt) * 100.0 / float(ctx_len))
+
         from gateway.platforms.base import ProcessingOutcome
         active_card_id = self._active_progress_cards.get(chat_id)
         entries = self._progress_entries.get(chat_id, [])
@@ -238,6 +247,7 @@ class FeishuCardHandler:
                 "output_tokens": output_tokens,
                 "tool_calls": tool_calls,
                 "bash_calls": bash_calls,
+                "context_pct": context_pct,
             }
 
         if active_card_id:
@@ -693,6 +703,7 @@ class FeishuCardHandler:
         output_tokens: Optional[int],
         tool_calls: Optional[int] = None,
         bash_calls: Optional[int] = None,
+        context_pct: Optional[float] = None,
     ) -> List[Dict]:
         """Build card elements for a runtime-stats footer.
 
@@ -713,6 +724,8 @@ class FeishuCardHandler:
         out_h = _humanize_tokens(output_tokens)
         if in_h or out_h:
             parts.append(f"↑{in_h or '0'} ↓{out_h or '0'} tokens")
+        if context_pct is not None:
+            parts.append(f"ctx {context_pct:.0f}%")
         if not parts:
             return []
         content = " · ".join(parts)

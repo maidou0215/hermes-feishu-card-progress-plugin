@@ -221,6 +221,40 @@ class TestFooterRender(unittest.TestCase):
         rendered = json.dumps(elements, ensure_ascii=False)
         self.assertNotIn("calls", rendered)
 
+    def test_footer_with_context_pct(self):
+        """Footer renders ctx% segment when context_pct is provided."""
+        cls, _ = self._load_handler_cls()
+        elements = cls._build_footer_elements(
+            duration=4.2, model="m",
+            input_tokens=1200, output_tokens=320,
+            context_pct=42.7,
+        )
+        rendered = json.dumps(elements, ensure_ascii=False)
+        # Rounded to integer percent.
+        self.assertIn("ctx 43%", rendered)
+
+    def test_footer_clamps_context_pct_at_100(self):
+        """Even when prompt exceeds window, ctx shows at most 100%."""
+        cls, _ = self._load_handler_cls()
+        elements = cls._build_footer_elements(
+            duration=1.0, model="m",
+            input_tokens=10, output_tokens=20,
+            context_pct=99.6,
+        )
+        rendered = json.dumps(elements, ensure_ascii=False)
+        self.assertIn("ctx 100%", rendered)
+
+    def test_footer_omits_context_when_none(self):
+        """Footer omits ctx segment when context_pct is None."""
+        cls, _ = self._load_handler_cls()
+        elements = cls._build_footer_elements(
+            duration=1.0, model="m",
+            input_tokens=10, output_tokens=20,
+            context_pct=None,
+        )
+        rendered = json.dumps(elements, ensure_ascii=False)
+        self.assertNotIn("ctx", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()
