@@ -76,6 +76,17 @@ def _format_tool_input(tool_name: str, text: str) -> str:
     return f"`{safe}`"
 
 
+def _humanize_tokens(n: Optional[int]) -> str:
+    """1234 → '1.2k', 5678900 → '5.7M', None → ''."""
+    if n is None:
+        return ""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
 class FeishuCardHandler:
     """Composition-based handler that adds interactive card progress.
 
@@ -171,18 +182,33 @@ class FeishuCardHandler:
         logger.info("[Card] on_processing_start: chat_id=%s", chat_id)
         await self._cleanup_stale_cards()
 
+        import time
+        self._turn_start_times[chat_id] = time.monotonic()
+
         self._completed_chats.discard(chat_id)
         self._active_progress_cards.pop(chat_id, None)
         self._progress_entries.pop(chat_id, None)
         self._first_response_ids.pop(chat_id, None)
         self._last_response_payloads.pop(chat_id, None)
 
-    async def on_processing_complete(self, event: Any, outcome: Any) -> None:
+    async def on_processing_complete(
+        self, event: Any, outcome: Any, *, agent: Any = None
+    ) -> None:
         a = self._a
         chat_id = event.source.chat_id
         logger.info("[Card] on_processing_complete: outcome=%s chat_id=%s",
                      outcome, chat_id)
         self._completed_chats.add(chat_id)
+
+        import time
+        start = self._turn_start_times.pop(chat_id, None)
+        duration = (time.monotonic() - start) if start is not None else None
+
+        # Read token/model stats from the AIAgent instance, if available.
+        # Attributes are optional — some agent code paths may not populate them.
+        input_tokens = getattr(agent, "session_input_tokens", None) if agent else None
+        output_tokens = getattr(agent, "session_output_tokens", None) if agent else None
+        model = getattr(agent, "model", None) if agent else None
 
         from gateway.platforms.base import ProcessingOutcome
         active_card_id = self._active_progress_cards.get(chat_id)
@@ -197,10 +223,16 @@ class FeishuCardHandler:
                 if outcome is ProcessingOutcome.FAILURE:
                     await self._update_progress_card_failed(active_card_id, chat_id)
                 else:
-                    await self._update_progress_card_completed(active_card_id, chat_id)
+                    await self._update_progress_card_completed(
+                        active_card_id, chat_id,
+                        duration=duration, model=model,
+                        input_tokens=input_tokens, output_tokens=output_tokens,
+                    )
 
         self._active_progress_cards.pop(chat_id, None)
         self._progress_entries.pop(chat_id, None)
+        self._progress_seq.pop(chat_id, None)
+        self._last_sent_seq.pop(chat_id, None)
         self._save_active_cards()
 
         # Add response header to the final response message to distinguish
@@ -430,27 +462,39 @@ class FeishuCardHandler:
                 logger.warning("[Card] Progress card patch error: %s", exc)
 
     async def _update_progress_card_completed(
-        self, card_message_id: str, chat_id: str
+        self, card_message_id: str, chat_id: str,
+        *, duration: Optional[float] = None,
+        model: Optional[str] = None,
+        input_tokens: Optional[int] = None,
+        output_tokens: Optional[int] = None,
     ) -> None:
         a = self._a
         if not a._client:
             return
-        async with self._get_patch_lock(chat_id):
-            try:
+        try:
+            async with self._get_patch_lock(chat_id):
                 entries = self._progress_entries.get(chat_id, [])
                 trimmed, truncated = self._trim_entries(entries)
                 elements = self._render_progress_entries(trimmed, truncated)
-                elements.append({"tag": "hr"})
-                elements.append({
-                    "tag": "div",
-                    "text": {
-                        "tag": "plain_text",
-                        "content": "This progress card is no longer updating. "
-                                   "Full response is in the next message.",
-                        "text_size": "notation",
-                        "text_color": "grey",
-                    },
-                })
+                footer = self._build_footer_elements(
+                    duration=duration, model=model,
+                    input_tokens=input_tokens, output_tokens=output_tokens,
+                )
+                if footer:
+                    elements.append({"tag": "hr"})
+                    elements.extend(footer)
+                else:
+                    elements.append({"tag": "hr"})
+                    elements.append({
+                        "tag": "div",
+                        "text": {
+                            "tag": "plain_text",
+                            "content": "This progress card is no longer updating. "
+                                       "Full response is in the next message.",
+                            "text_size": "notation",
+                            "text_color": "grey",
+                        },
+                    })
                 card = {
                     "schema": "2.0",
                     "config": {"wide_screen_mode": True},
@@ -478,10 +522,10 @@ class FeishuCardHandler:
                     timeout=_API_TIMEOUT,
                 )
                 self._last_sent_seq[chat_id] = self._progress_seq.get(chat_id, 0)
-            except asyncio.TimeoutError:
-                logger.warning("[Card] Completed card update timed out (%ds)", _API_TIMEOUT)
-            except Exception as exc:
-                logger.warning("[Card] Completed card update error: %s", exc)
+        except asyncio.TimeoutError:
+            logger.warning("[Card] Completed card update timed out (%ds)", _API_TIMEOUT)
+        except Exception as exc:
+            logger.warning("[Card] Completed card update error: %s", exc)
 
     async def _update_progress_card_failed(
         self, card_message_id: str, chat_id: str
@@ -612,6 +656,41 @@ class FeishuCardHandler:
     # -----------------------------------------------------------------
     # Rendering helpers
     # -----------------------------------------------------------------
+
+    @staticmethod
+    def _build_footer_elements(
+        *,
+        duration: Optional[float],
+        model: Optional[str],
+        input_tokens: Optional[int],
+        output_tokens: Optional[int],
+    ) -> List[Dict]:
+        """Build card elements for a runtime-stats footer.
+
+        Returns an empty list if no data is available so callers can
+        unconditionally extend the elements list.
+        """
+        parts: List[str] = []
+        if duration is not None:
+            parts.append(f"⏱ {duration:.1f}s")
+        if model:
+            parts.append(f"\U0001f916 {model}")
+        in_h = _humanize_tokens(input_tokens)
+        out_h = _humanize_tokens(output_tokens)
+        if in_h or out_h:
+            parts.append(f"↑{in_h or '0'} ↓{out_h or '0'} tokens")
+        if not parts:
+            return []
+        content = " · ".join(parts)
+        return [{
+            "tag": "div",
+            "text": {
+                "tag": "plain_text",
+                "content": content,
+                "text_size": "notation",
+                "text_color": "grey",
+            },
+        }]
 
     @staticmethod
     def _render_progress_entries(

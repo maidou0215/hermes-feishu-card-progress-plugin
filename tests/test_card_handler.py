@@ -5,6 +5,7 @@ Uses stdlib unittest only — no pytest dependency. Run with:
     python -m unittest tests.test_card_handler -v
 """
 
+import json
 import os
 import sys
 import unittest
@@ -132,6 +133,58 @@ class TestPatchStaleDrop(unittest.TestCase):
         asyncio.run(run())
         # last_sent_seq should remain 5 (not downgraded to 3).
         self.assertEqual(handler._last_sent_seq.get("c1"), 5)
+
+
+class TestFooterRender(unittest.TestCase):
+    """Verify footer element structure for completed cards."""
+
+    def _load_handler_cls(self):
+        spec = importlib.util.spec_from_file_location(
+            "card_handler_under_test",
+            _REPO_ROOT / "card_handler.py",
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.FeishuCardHandler, mod
+
+    def test_footer_includes_duration_model_tokens(self):
+        cls, _ = self._load_handler_cls()
+        # _build_footer_elements is a static method.
+        elements = cls._build_footer_elements(
+            duration=12.3,
+            model="claude-sonnet-4-6",
+            input_tokens=1234,
+            output_tokens=5678,
+        )
+        # Should be a non-empty list of card element dicts.
+        self.assertIsInstance(elements, list)
+        self.assertGreater(len(elements), 0)
+        # Render to a single string for assertions on content.
+        rendered = json.dumps(elements, ensure_ascii=False)
+        self.assertIn("12.3", rendered)            # duration (1 decimal)
+        self.assertIn("claude-sonnet-4-6", rendered)  # model
+        self.assertIn("1.2k", rendered)            # input tokens (humanized)
+        self.assertIn("5.7k", rendered)            # output tokens (humanized)
+
+    def test_footer_omits_missing_fields(self):
+        cls, _ = self._load_handler_cls()
+        elements = cls._build_footer_elements(
+            duration=None, model=None,
+            input_tokens=None, output_tokens=None,
+        )
+        # With no data, footer should be empty (no element emitted).
+        self.assertEqual(elements, [])
+
+    def test_footer_handles_zero_tokens(self):
+        cls, _ = self._load_handler_cls()
+        elements = cls._build_footer_elements(
+            duration=0.5, model="test-model",
+            input_tokens=0, output_tokens=0,
+        )
+        rendered = json.dumps(elements, ensure_ascii=False)
+        self.assertIn("0.5", rendered)
+        # 0 tokens — we still render "0" so the user sees the turn was free.
+        self.assertIn("0", rendered)
 
 
 if __name__ == "__main__":

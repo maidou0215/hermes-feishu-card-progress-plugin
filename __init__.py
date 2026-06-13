@@ -289,6 +289,7 @@ def _get_card_handler(adapter) -> Optional[FeishuCardHandler]:
 _adapter_ref: Any = None       # FeishuAdapter instance (set per-request)
 _event_loop_ref: Any = None    # Gateway event loop   (set per-request)
 _response_header_enabled: bool = True  # set from env in register()
+_agent_ref: Any = None        # run_agent.AIAgent (captured in _patched_agent_setattr)
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +318,7 @@ async def _patched_on_processing_start(self, event) -> None:
 async def _patched_on_processing_complete(self, event, outcome) -> None:
     """Wrap original on_processing_complete + card finalization."""
     handler = _get_card_handler(self)
-    await handler.on_processing_complete(event, outcome)
+    await handler.on_processing_complete(event, outcome, agent=_agent_ref)
     # Call original (removes Typing reaction, adds failure reaction)
     await _orig_on_processing_complete(self, event, outcome)
 
@@ -771,6 +772,11 @@ def register(ctx) -> None:
         _orig_setattr = AIAgent.__setattr__
 
         def _patched_agent_setattr(self_agent, name, value):
+            global _agent_ref
+            # tool_progress_callback is set late in agent init, after
+            # session state and model are configured — capture the ref here.
+            if name == "tool_progress_callback":
+                _agent_ref = self_agent
             if name == "tool_progress_callback" and value is not None:
                 value = _wrap_progress_callback(value)
             _orig_setattr(self_agent, name, value)
