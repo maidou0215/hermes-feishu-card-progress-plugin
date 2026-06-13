@@ -108,6 +108,7 @@ class FeishuCardHandler:
         self._patch_locks: Dict[str, "asyncio.Lock"] = {}  # chat_id → PATCH serialization lock
         self._progress_seq: Dict[str, int] = {}            # chat_id → monotonic entry counter
         self._last_sent_seq: Dict[str, int] = {}           # chat_id → last PATCH seq actually sent
+        self._pending_footer: Dict[str, Dict[str, Any]] = {}  # chat_id → footer kwargs, applied on Response card
         self._load_stale_cards()
 
     @property
@@ -190,6 +191,7 @@ class FeishuCardHandler:
         self._progress_entries.pop(chat_id, None)
         self._first_response_ids.pop(chat_id, None)
         self._last_response_payloads.pop(chat_id, None)
+        self._pending_footer.pop(chat_id, None)
 
     async def on_processing_complete(
         self, event: Any, outcome: Any, *, agent: Any = None
@@ -214,6 +216,17 @@ class FeishuCardHandler:
         active_card_id = self._active_progress_cards.get(chat_id)
         entries = self._progress_entries.get(chat_id, [])
 
+        # Stage footer data for the Response card finalize step.  Only stage
+        # when we have a real chance to render it — i.e. a successful turn
+        # where the response card finalize will actually fire.
+        if outcome is not ProcessingOutcome.FAILURE:
+            self._pending_footer[chat_id] = {
+                "duration": duration,
+                "model": model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            }
+
         if active_card_id:
             has_tool_entries = any(e.get("type") == "tool_use" for e in entries)
             if not has_tool_entries:
@@ -223,11 +236,7 @@ class FeishuCardHandler:
                 if outcome is ProcessingOutcome.FAILURE:
                     await self._update_progress_card_failed(active_card_id, chat_id)
                 else:
-                    await self._update_progress_card_completed(
-                        active_card_id, chat_id,
-                        duration=duration, model=model,
-                        input_tokens=input_tokens, output_tokens=output_tokens,
-                    )
+                    await self._update_progress_card_completed(active_card_id, chat_id)
 
         self._active_progress_cards.pop(chat_id, None)
         self._progress_entries.pop(chat_id, None)
@@ -463,10 +472,6 @@ class FeishuCardHandler:
 
     async def _update_progress_card_completed(
         self, card_message_id: str, chat_id: str,
-        *, duration: Optional[float] = None,
-        model: Optional[str] = None,
-        input_tokens: Optional[int] = None,
-        output_tokens: Optional[int] = None,
     ) -> None:
         a = self._a
         if not a._client:
@@ -476,25 +481,17 @@ class FeishuCardHandler:
                 entries = self._progress_entries.get(chat_id, [])
                 trimmed, truncated = self._trim_entries(entries)
                 elements = self._render_progress_entries(trimmed, truncated)
-                footer = self._build_footer_elements(
-                    duration=duration, model=model,
-                    input_tokens=input_tokens, output_tokens=output_tokens,
-                )
-                if footer:
-                    elements.append({"tag": "hr"})
-                    elements.extend(footer)
-                else:
-                    elements.append({"tag": "hr"})
-                    elements.append({
-                        "tag": "div",
-                        "text": {
-                            "tag": "plain_text",
-                            "content": "This progress card is no longer updating. "
-                                       "Full response is in the next message.",
-                            "text_size": "notation",
-                            "text_color": "grey",
-                        },
-                    })
+                elements.append({"tag": "hr"})
+                elements.append({
+                    "tag": "div",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "This progress card is no longer updating. "
+                                   "Full response is in the next message.",
+                        "text_size": "notation",
+                        "text_color": "grey",
+                    },
+                })
                 card = {
                     "schema": "2.0",
                     "config": {"wide_screen_mode": True},
@@ -615,11 +612,12 @@ class FeishuCardHandler:
             self._last_response_payloads[chat_id] = payload
 
     async def _finalize_response_card(self, chat_id: str) -> None:
-        """Patch the last response message with an indigo header."""
+        """Patch the last response message with an indigo header and footer."""
         msg_id = self._first_response_ids.pop(chat_id, None)
         payload = self._last_response_payloads.pop(chat_id, None)
-        logger.info("[Card] _finalize_response_card: chat=%s msg_id=%s has_payload=%s",
-                     chat_id, msg_id, bool(payload))
+        footer_data = self._pending_footer.pop(chat_id, None)
+        logger.info("[Card] _finalize_response_card: chat=%s msg_id=%s has_payload=%s footer=%s",
+                     chat_id, msg_id, bool(payload), bool(footer_data))
         if not msg_id or not payload:
             return
         a = self._a
@@ -631,6 +629,22 @@ class FeishuCardHandler:
                 "title": {"tag": "plain_text", "content": f"{self._agent_label} · Response"},
                 "template": "turquoise",
             }
+            # Append runtime-stats footer (duration / model / tokens) to the
+            # response body.  This is where users actually look, not on the
+            # ephemeral Completed card.
+            if footer_data:
+                footer_elements = self._build_footer_elements(**footer_data)
+                if footer_elements:
+                    body = card.setdefault("body", {})
+                    if not isinstance(body, dict):
+                        body = {}
+                        card["body"] = body
+                    elements = body.setdefault("elements", [])
+                    if not isinstance(elements, list):
+                        elements = []
+                        body["elements"] = elements
+                    elements.append({"tag": "hr"})
+                    elements.extend(footer_elements)
             from lark_oapi.api.im.v1 import PatchMessageRequestBody, PatchMessageRequest
             patch_body = (
                 PatchMessageRequestBody.builder()
