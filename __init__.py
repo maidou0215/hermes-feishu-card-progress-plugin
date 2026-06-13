@@ -90,6 +90,32 @@ def _parse_progress_text(content: str) -> list[tuple[str, str]]:
 
 
 # ---------------------------------------------------------------------------
+# Reasoning tag fallback stripping
+# ---------------------------------------------------------------------------
+# Some providers (DeepSeek, Qwen, Moonshot) occasionally leak raw
+# /<thinking> tags into the answer text instead of routing them
+# through the reasoning channel.  We strip both complete blocks and
+# orphan tags as a defensive measure before the final response is sent.
+_THINK_BLOCK_RE = re.compile(
+    r"<think(?:ing)?>.*?</think(?:ing)?>", re.IGNORECASE | re.DOTALL
+)
+_THINK_TAG_RE = re.compile(r"</?think(?:ing)?>", re.IGNORECASE)
+
+
+def _strip_think_tags(text: str) -> str:
+    """Remove  /<thinking> blocks and orphan tags from text.
+
+    Order matters: strip complete blocks first (so their inner content
+    disappears), then strip any leftover orphan opening/closing tags.
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    text = _THINK_BLOCK_RE.sub("", text)
+    text = _THINK_TAG_RE.sub("", text)
+    return text
+
+
+# ---------------------------------------------------------------------------
 # Interactive card text extraction (ported from cc-connect Go implementation)
 # ---------------------------------------------------------------------------
 
@@ -333,6 +359,12 @@ async def _patched_send(self, chat_id, content, reply_to=None, metadata=None):
         # Fallback: if content starts with the captured reasoning text, strip it.
         if _last_reasoning_text and content.startswith(_last_reasoning_text):
             content = content[len(_last_reasoning_text):].strip()
+
+    # Defensive: strip any leaked /<thinking> tags from the final
+    # response text.  Normally reasoning is routed to the card via
+    # on_thinking; this catches models that emit raw tags.
+    if isinstance(content, str):
+        content = _strip_think_tags(content)
 
     # Track the first response message for this chat (used later to add header).
     handler = _get_card_handler(self)
