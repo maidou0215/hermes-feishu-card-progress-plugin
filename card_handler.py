@@ -110,6 +110,7 @@ class FeishuCardHandler:
         self._last_sent_seq: Dict[str, int] = {}           # chat_id → last PATCH seq actually sent
         self._pending_footer: Dict[str, Dict[str, Any]] = {}  # chat_id → footer kwargs, applied on Response card
         self._response_text_len: Dict[str, int] = {}        # chat_id → final response char len
+        self._aborted_chats: set = set()                   # chat_ids aborted (recall / patch-fail)
         self._load_stale_cards()
 
     @property
@@ -122,6 +123,21 @@ class FeishuCardHandler:
         seq = self._progress_seq.get(chat_id, 0) + 1
         self._progress_seq[chat_id] = seq
         return seq
+
+    def _mark_aborted(self, chat_id: str, reason: str = "recalled") -> bool:
+        """Mark a chat as aborted. Idempotent; returns True on first abort.
+
+        Clears reply/footer tracking so no final reply is sent and no
+        Response header is finalized. Downstream PATCH/finalize paths
+        short-circuit via ``chat_id in self._aborted_chats``.
+        """
+        if chat_id in self._aborted_chats:
+            return False
+        self._aborted_chats.add(chat_id)
+        self._pending_footer.pop(chat_id, None)
+        self._first_response_ids.pop(chat_id, None)
+        logger.info("[Card] Aborted chat %s (reason=%s)", chat_id, reason)
+        return True
 
     def _get_patch_lock(self, chat_id: str) -> "asyncio.Lock":
         lock = self._patch_locks.get(chat_id)
@@ -460,6 +476,8 @@ class FeishuCardHandler:
         — prevents an older snapshot from overwriting newer content
         when network reordering happens.
         """
+        if chat_id in self._aborted_chats:
+            return
         a = self._a
         if not a._client:
             return
@@ -513,6 +531,8 @@ class FeishuCardHandler:
     async def _update_progress_card_completed(
         self, card_message_id: str, chat_id: str,
     ) -> None:
+        if chat_id in self._aborted_chats:
+            return
         a = self._a
         if not a._client:
             return
@@ -567,6 +587,8 @@ class FeishuCardHandler:
     async def _update_progress_card_failed(
         self, card_message_id: str, chat_id: str
     ) -> None:
+        if chat_id in self._aborted_chats:
+            return
         a = self._a
         if not a._client:
             return
@@ -653,6 +675,8 @@ class FeishuCardHandler:
 
     async def _finalize_response_card(self, chat_id: str) -> None:
         """Patch the last response message with an indigo header and footer."""
+        if chat_id in self._aborted_chats:
+            return
         msg_id = self._first_response_ids.pop(chat_id, None)
         payload = self._last_response_payloads.pop(chat_id, None)
         footer_data = self._pending_footer.pop(chat_id, None)
