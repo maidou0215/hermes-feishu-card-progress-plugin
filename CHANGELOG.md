@@ -1,5 +1,44 @@
 # Changelog
 
+## v1.4.0 (2026-06-19)
+
+### feat: runtime stats footer on response cards
+
+- 最终 Response 卡片底部新增运行统计 footer（duration / model / tool_calls / bash_calls / input_tokens / output_tokens / context_pct）
+- 示例：`⏱ 4.2s · 🤖 claude-sonnet-4-6 · 🔧 5 calls · bash ×3 · ↑1.2k ↓320 tokens · ctx 42%`
+- 通过 `_patched_agent_setattr` 捕获 AIAgent 实例，在 `on_processing_complete` 读取 `session_input_tokens` / `session_output_tokens` / `model`
+- 工具调用次数从 `_progress_entries` 计算，bash-family（bash/shell/terminal/run_shell_command）单独拆分
+- 上下文占比从 `agent.context_compressor.last_prompt_tokens` / `context_length` 计算（与 Hermes 自身 `usage_percent` 公式一致，clamp 在 100%）
+- Duration 使用 `time.monotonic()` 在 `on_processing_start` / `on_processing_complete` 之间计算
+- Footer 数据缓存在 `_pending_footer`，由 `_finalize_response_card` 渲染到 Response 卡片底部（不是中间的 Completed 状态卡）
+
+### feat: token estimation fallback (GLM / z.ai)
+
+- 部分 provider（z.ai / GLM）streaming 接口不返回 usage，导致 footer token 恒为 0
+- session tokens 双 0 时：input 从 `agent.context_compressor.last_prompt_tokens` 读取，output 从最终回复字符数 ÷ 4 估算
+- `_patched_send` 捕获最终回复文本长度，缓存到 `_response_text_len[chat_id]` 供估算复用
+- token 双 0 时隐藏 footer 的 `↑0 ↓0 tokens` 段，避免误导（仍保留 ctx% 等其他统计）
+
+### feat: <think>/<thinking> tag fallback stripping
+
+- DeepSeek / Qwen / Moonshot 等模型偶发把原始 `<think>` 标签泄漏到最终回答文本中
+- 在 `_patched_send` 中加 `_strip_think_tags` 兜底剥离完整块和孤立标签
+- 借鉴 hermes-feishu-streaming-card 的 defensive layer
+
+### fix: per-chat PATCH serialization + stale-drop
+
+- 多线程回调并发 PATCH 同一卡片时存在内容回退竞态（旧快照后到覆盖新内容）
+- 加 per-chat `asyncio.Lock` 串行化所有 PATCH 调用
+- 加 monotonic seq counter，落后于 `last_sent_seq` 的 patch 在 lock 内被 drop
+- 完成/失败终态 PATCH 同样使用该 lock，并刷新 `last_sent_seq` 防止后续 stale patch 覆盖
+- 借鉴 hermes-feishu-streaming-card issue #31
+
+### test: stdlib unittest harness
+
+- 新增 `tests/test_card_handler.py`（stdlib `unittest`，无 pytest 依赖）
+- 覆盖 `<think>` 剥离（8 tests）、PATCH seq stale-drop（3 tests）、footer 渲染（3 tests）
+- 通过 `importlib` 加载 `__init__.py` / `card_handler.py`（目录名含连字符无法直接 import）
+
 ## v1.3.0 (2026-05-23)
 
 ### feat: retroactive response header, replace green-header mechanism

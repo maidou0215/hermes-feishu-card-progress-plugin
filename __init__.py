@@ -90,6 +90,32 @@ def _parse_progress_text(content: str) -> list[tuple[str, str]]:
 
 
 # ---------------------------------------------------------------------------
+# Reasoning tag fallback stripping
+# ---------------------------------------------------------------------------
+# Some providers (DeepSeek, Qwen, Moonshot) occasionally leak raw
+# /<thinking> tags into the answer text instead of routing them
+# through the reasoning channel.  We strip both complete blocks and
+# orphan tags as a defensive measure before the final response is sent.
+_THINK_BLOCK_RE = re.compile(
+    r"<think(?:ing)?>.*?</think(?:ing)?>", re.IGNORECASE | re.DOTALL
+)
+_THINK_TAG_RE = re.compile(r"</?think(?:ing)?>", re.IGNORECASE)
+
+
+def _strip_think_tags(text: str) -> str:
+    """Remove  /<thinking> blocks and orphan tags from text.
+
+    Order matters: strip complete blocks first (so their inner content
+    disappears), then strip any leftover orphan opening/closing tags.
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    text = _THINK_BLOCK_RE.sub("", text)
+    text = _THINK_TAG_RE.sub("", text)
+    return text
+
+
+# ---------------------------------------------------------------------------
 # Interactive card text extraction (ported from cc-connect Go implementation)
 # ---------------------------------------------------------------------------
 
@@ -263,6 +289,7 @@ def _get_card_handler(adapter) -> Optional[FeishuCardHandler]:
 _adapter_ref: Any = None       # FeishuAdapter instance (set per-request)
 _event_loop_ref: Any = None    # Gateway event loop   (set per-request)
 _response_header_enabled: bool = True  # set from env in register()
+_agent_ref: Any = None        # run_agent.AIAgent (captured in _patched_agent_setattr)
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +318,7 @@ async def _patched_on_processing_start(self, event) -> None:
 async def _patched_on_processing_complete(self, event, outcome) -> None:
     """Wrap original on_processing_complete + card finalization."""
     handler = _get_card_handler(self)
-    await handler.on_processing_complete(event, outcome)
+    await handler.on_processing_complete(event, outcome, agent=_agent_ref)
     # Call original (removes Typing reaction, adds failure reaction)
     await _orig_on_processing_complete(self, event, outcome)
 
@@ -334,6 +361,12 @@ async def _patched_send(self, chat_id, content, reply_to=None, metadata=None):
         if _last_reasoning_text and content.startswith(_last_reasoning_text):
             content = content[len(_last_reasoning_text):].strip()
 
+    # Defensive: strip any leaked /<thinking> tags from the final
+    # response text.  Normally reasoning is routed to the card via
+    # on_thinking; this catches models that emit raw tags.
+    if isinstance(content, str):
+        content = _strip_think_tags(content)
+
     # Track the first response message for this chat (used later to add header).
     handler = _get_card_handler(self)
     has_active_card = chat_id and chat_id in handler._active_progress_cards
@@ -364,12 +397,15 @@ async def _patched_send(self, chat_id, content, reply_to=None, metadata=None):
                 last_result = r
                 if i == 0 and has_active_card and getattr(r, "message_id", None):
                     handler.track_response_message(chat_id, r.message_id)
+                    handler._response_text_len[chat_id] = len(content)
         return last_result
 
     result = await _orig_send(self, chat_id, content, reply_to=reply_to, metadata=metadata)
 
     if has_active_card and result and getattr(result, "message_id", None):
         handler.track_response_message(chat_id, result.message_id)
+        if isinstance(content, str):
+            handler._response_text_len[chat_id] = len(content)
 
     return result
 
@@ -739,6 +775,11 @@ def register(ctx) -> None:
         _orig_setattr = AIAgent.__setattr__
 
         def _patched_agent_setattr(self_agent, name, value):
+            global _agent_ref
+            # tool_progress_callback is set late in agent init, after
+            # session state and model are configured — capture the ref here.
+            if name == "tool_progress_callback":
+                _agent_ref = self_agent
             if name == "tool_progress_callback" and value is not None:
                 value = _wrap_progress_callback(value)
             _orig_setattr(self_agent, name, value)

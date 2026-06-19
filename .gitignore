@@ -6,3 +6,9 @@ __pycache__/
 dist/
 build/
 .env
+
+# Local ops scripts (not part of the plugin)
+merge_memory_to_profiles.py
+
+# Local agent instructions (not part of the plugin)
+AGENTS.md
