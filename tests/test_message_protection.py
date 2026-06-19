@@ -108,5 +108,77 @@ class TestAbortRendering(unittest.TestCase):
         self.assertEqual(to_thread.call_count, 1)
 
 
+class TestPassiveAbort(unittest.TestCase):
+    def test_patch_failure_aborts_chat(self):
+        """A raising PATCH marks the chat aborted (reason=patch_failed)."""
+        handler, mod = _load_handler()
+        handler._active_progress_cards["c1"] = "card1"
+        handler._progress_entries["c1"] = [
+            {"type": "tool_use", "tool": "bash", "preview": "ls"}
+        ]
+
+        async def run():
+            real = mod.FeishuCardHandler._patch_progress_card.__get__(handler)
+            def boom(*a, **kw):
+                raise RuntimeError("card not found")
+            with patch("asyncio.to_thread", new=MagicMock(side_effect=boom)), \
+                 patch("asyncio.wait_for", new=AsyncMock()):
+                await real("card1", "c1",
+                           [{"type": "tool_use", "tool": "bash", "preview": "ls"}],
+                           seq=1)
+
+        asyncio.run(run())
+        self.assertIn("c1", handler._aborted_chats)
+
+
+class TestAbortedGuards(unittest.TestCase):
+    """Task 1 added guards to 4 methods; _patch_progress_card is tested in
+    TestAbortMarking. These cover the other 3 (completed/failed/finalize)."""
+
+    def test_aborted_completed_short_circuits(self):
+        handler, mod = _load_handler()
+        handler._mark_aborted("c1", "recalled")
+        to_thread = MagicMock()
+
+        async def run():
+            real = mod.FeishuCardHandler._update_progress_card_completed.__get__(handler)
+            with patch("asyncio.to_thread", new=to_thread), \
+                 patch("asyncio.wait_for", new=AsyncMock()):
+                await real("card1", "c1")
+
+        asyncio.run(run())
+        to_thread.assert_not_called()
+
+    def test_aborted_failed_short_circuits(self):
+        handler, mod = _load_handler()
+        handler._mark_aborted("c1", "recalled")
+        to_thread = MagicMock()
+
+        async def run():
+            real = mod.FeishuCardHandler._update_progress_card_failed.__get__(handler)
+            with patch("asyncio.to_thread", new=to_thread), \
+                 patch("asyncio.wait_for", new=AsyncMock()):
+                await real("card1", "c1")
+
+        asyncio.run(run())
+        to_thread.assert_not_called()
+
+    def test_aborted_finalize_short_circuits(self):
+        handler, mod = _load_handler()
+        handler._mark_aborted("c1", "recalled")
+        handler._first_response_ids["c1"] = "msg1"  # would normally proceed
+        handler._last_response_payloads["c1"] = "{}"
+        to_thread = MagicMock()
+
+        async def run():
+            real = mod.FeishuCardHandler._finalize_response_card.__get__(handler)
+            with patch("asyncio.to_thread", new=to_thread), \
+                 patch("asyncio.wait_for", new=AsyncMock()):
+                await real("c1")
+
+        asyncio.run(run())
+        to_thread.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

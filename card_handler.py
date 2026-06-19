@@ -531,6 +531,7 @@ class FeishuCardHandler:
         if not a._client:
             return
         lock = self._get_patch_lock(chat_id)
+        patch_failed = False
         async with lock:
             if seq is not None and seq < self._last_sent_seq.get(chat_id, 0):
                 logger.debug(
@@ -574,8 +575,14 @@ class FeishuCardHandler:
                     self._last_sent_seq[chat_id] = seq
             except asyncio.TimeoutError:
                 logger.warning("[Card] Progress card patch timed out (%ds)", _API_TIMEOUT)
+                patch_failed = True
             except Exception as exc:
                 logger.warning("[Card] Progress card patch error: %s", exc)
+                patch_failed = True
+        # Call abort() after releasing the lock to avoid deadlock
+        # (abort() → _update_progress_card_aborted() acquires the same lock)
+        if patch_failed:
+            await self.abort(chat_id, "patch_failed")
 
     async def _update_progress_card_completed(
         self, card_message_id: str, chat_id: str,
