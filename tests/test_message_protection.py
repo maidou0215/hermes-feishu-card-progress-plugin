@@ -30,6 +30,21 @@ def _load_handler():
     return handler, mod
 
 
+class TestAbortResetOnNewTurn(unittest.TestCase):
+    def test_on_processing_start_clears_aborted_state(self):
+        """A new turn (on_processing_start) must clear the aborted flag so the
+        chat works again — otherwise abort leaks into the next conversation."""
+        handler, mod = _load_handler()
+        handler._mark_aborted("c1", "recalled")
+        self.assertIn("c1", handler._aborted_chats)
+
+        event = MagicMock()
+        event.source.chat_id = "c1"
+        asyncio.run(handler.on_processing_start(event))
+
+        self.assertNotIn("c1", handler._aborted_chats)
+
+
 class TestAbortMarking(unittest.TestCase):
     def test_mark_aborted_first_returns_true(self):
         handler, _ = _load_handler()
@@ -206,10 +221,9 @@ class TestRecallHook(unittest.TestCase):
         adapter._current_chat_id = "c1"
         adapter._reply_to_message_id = "om_question"
         handler = MagicMock()
-        # Make abort() return a coroutine
-        async def fake_abort(*a, **kw):
-            pass
-        handler.abort = fake_abort
+        # Return None instead of a coroutine to avoid RuntimeWarning
+        # when run_coroutine_threadsafe is mocked (the coroutine is never awaited)
+        handler.abort = MagicMock(return_value=None)
         adapter._card_handler_instance = handler
         loop = MagicMock()
         loop.is_closed.return_value = False  # Important: mock loop as not closed
@@ -355,6 +369,46 @@ class TestReplyGuard(unittest.TestCase):
 
         asyncio.run(run())
         orig_send.assert_called_once()
+
+    def test_aborted_chat_skips_multi_table_reply(self):
+        """Aborted chat skips even multi-table (split-branch) replies —
+        locks the guard-before-table-split positioning."""
+        import os
+        os.environ.pop("FEISHU_PROGRESS_STYLE", None)
+        from types import ModuleType
+        spec = importlib.util.spec_from_file_location(
+            "feishu_card_progress_reply3", _REPO_ROOT / "__init__.py"
+        )
+        mock_ch = ModuleType("card_handler")
+        mock_ch.FeishuCardHandler = MagicMock()
+        sys.modules["card_handler"] = mock_ch
+        sys.modules["feishu_card_progress_reply3.card_handler"] = mock_ch
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        adapter = MagicMock()
+        handler = MagicMock()
+        handler._aborted_chats = {"c1"}
+        adapter._card_handler_instance = handler
+
+        orig_send = MagicMock()
+        mod._orig_send = orig_send
+        # Force split mode + content with >5 tables
+        mod._table_overflow_mode = "split"
+
+        # Build markdown with 6 tables (each: header | sep | row)
+        table = "| h1 | h2 |\n|---|---|\n| a | b |\n"
+        content = "\n\n".join([table] * 6)
+
+        async def run():
+            await mod._patched_send(adapter, "c1", content, reply_to=None, metadata=None)
+
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            asyncio.run(run())
+        # Aborted: even the split branch must not send.
+        orig_send.assert_not_called()
 
 
 if __name__ == "__main__":

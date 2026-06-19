@@ -253,6 +253,7 @@ class FeishuCardHandler:
         self._turn_start_times[chat_id] = time.monotonic()
 
         self._completed_chats.discard(chat_id)
+        self._aborted_chats.discard(chat_id)
         self._active_progress_cards.pop(chat_id, None)
         self._progress_entries.pop(chat_id, None)
         self._first_response_ids.pop(chat_id, None)
