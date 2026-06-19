@@ -249,5 +249,113 @@ class TestRecallHook(unittest.TestCase):
         loop.run_coroutine_threadsafe.assert_not_called()
 
 
+class TestReplyGuard(unittest.TestCase):
+    """Task 5: Reply guard — _patched_send must skip final replies for aborted chats."""
+
+    def _load_init_mod(self):
+        import os
+        os.environ.pop("FEISHU_PROGRESS_STYLE", None)
+        spec = importlib.util.spec_from_file_location(
+            "feishu_card_progress_reply", _REPO_ROOT / "__init__.py"
+        )
+        from types import ModuleType
+        mock_ch = ModuleType("card_handler")
+        mock_ch.FeishuCardHandler = MagicMock()
+        sys.modules["card_handler"] = mock_ch
+        sys.modules["feishu_card_progress_reply.card_handler"] = mock_ch
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_aborted_chat_skips_final_reply(self):
+        """When a chat is aborted, _patched_send must not forward the final
+        reply to the real Feishu send."""
+        import os
+        os.environ.pop("FEISHU_PROGRESS_STYLE", None)
+        from types import ModuleType
+        spec = importlib.util.spec_from_file_location(
+            "feishu_card_progress_reply", _REPO_ROOT / "__init__.py"
+        )
+        mock_ch = ModuleType("card_handler")
+        mock_ch.FeishuCardHandler = MagicMock()
+        sys.modules["card_handler"] = mock_ch
+        sys.modules["feishu_card_progress_reply.card_handler"] = mock_ch
+
+        # Mock gateway.platforms.base.SendResult before loading the module
+        mock_send_result = MagicMock()
+        mock_send_result.success = True
+        mock_gateway_base = ModuleType("gateway.platforms.base")
+        mock_gateway_base.SendResult = lambda **kw: mock_send_result
+        sys.modules["gateway"] = ModuleType("gateway")
+        sys.modules["gateway.platforms"] = ModuleType("gateway.platforms")
+        sys.modules["gateway.platforms.base"] = mock_gateway_base
+
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        adapter = MagicMock()
+        handler = MagicMock()
+        handler._active_progress_cards = {"c1": "card1"}
+        handler._aborted_chats = {"c1"}  # already aborted
+        adapter._card_handler_instance = handler
+
+        # Mock _orig_send as an async function that should NOT be called
+        result_mock = MagicMock()
+        result_mock.success = True
+        result_mock.message_id = "msg123"
+
+        async def mock_orig_send(*a, **kw):
+            return result_mock
+
+        orig_send = AsyncMock(side_effect=mock_orig_send)
+        mod._orig_send = orig_send
+
+        async def run():
+            await mod._patched_send(adapter, "c1", "final reply text",
+                                    reply_to=None, metadata=None)
+
+        asyncio.run(run())
+        orig_send.assert_not_called()
+
+    def test_non_aborted_chat_sends_reply(self):
+        """Non-aborted chat must still send the reply (no false skip)."""
+        import os
+        os.environ.pop("FEISHU_PROGRESS_STYLE", None)
+        from types import ModuleType
+        spec = importlib.util.spec_from_file_location(
+            "feishu_card_progress_reply2", _REPO_ROOT / "__init__.py"
+        )
+        mock_ch = ModuleType("card_handler")
+        mock_ch.FeishuCardHandler = MagicMock()
+        sys.modules["card_handler"] = mock_ch
+        sys.modules["feishu_card_progress_reply2.card_handler"] = mock_ch
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        adapter = MagicMock()
+        handler = MagicMock()
+        handler._active_progress_cards = {}
+        handler._aborted_chats = set()  # NOT aborted
+        adapter._card_handler_instance = handler
+
+        # Mock _orig_send as an async function that SHOULD be called
+        result_mock = MagicMock()
+        result_mock.success = True
+        result_mock.message_id = "msg123"
+
+        async def mock_orig_send(*a, **kw):
+            return result_mock
+
+        orig_send = AsyncMock(side_effect=mock_orig_send)
+        mod._orig_send = orig_send
+
+        async def run():
+            await mod._patched_send(adapter, "c1", "final reply text",
+                                    reply_to=None, metadata=None)
+
+        asyncio.run(run())
+        orig_send.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

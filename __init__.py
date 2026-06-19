@@ -371,6 +371,16 @@ async def _patched_send(self, chat_id, content, reply_to=None, metadata=None):
     handler = _get_card_handler(self)
     has_active_card = chat_id and chat_id in handler._active_progress_cards
 
+    # Message protection: if this chat was aborted (user recalled the
+    # question / PATCH failed), do not send the final reply. Placed before
+    # the table-split branch so multi-table replies are skipped too, and
+    # keyed on _aborted_chats (not has_active_card, which on_processing_complete
+    # may have already popped).
+    if chat_id in handler._aborted_chats:
+        logger.info("[Card] Skipping final reply for aborted chat %s", chat_id)
+        from gateway.platforms.base import SendResult
+        return SendResult(success=True)
+
     # Multi-table splitting: when content has >5 markdown tables, split into
     # multiple ≤5-table chunks and send each as a separate interactive card.
     # Only active in "split" mode; "post" mode handles this at payload level.
