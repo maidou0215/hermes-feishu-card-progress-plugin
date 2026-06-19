@@ -69,5 +69,41 @@ class TestAbortMarking(unittest.TestCase):
         self.assertNotIn("c1", handler._last_sent_seq)
 
 
+class TestAbortRendering(unittest.TestCase):
+    def test_build_aborted_card_payload(self):
+        handler, mod = _load_handler()
+        entries = [{"type": "tool_use", "tool": "bash", "preview": "ls"}]
+        card = mod.FeishuCardHandler._build_aborted_card(entries, "recalled")
+        self.assertEqual(card["header"]["template"], "grey")
+        self.assertIn("Aborted", card["header"]["title"]["content"])
+        body = json.dumps(card, ensure_ascii=False)
+        self.assertIn("User recalled", body)
+
+    def test_build_aborted_card_patch_failed_reason(self):
+        handler, mod = _load_handler()
+        card = mod.FeishuCardHandler._build_aborted_card([], "patch_failed")
+        body = json.dumps(card, ensure_ascii=False)
+        self.assertIn("Card update failed", body)
+
+    def test_abort_renders_aborted_card_once(self):
+        """abort() flips an active progress card to Aborted; idempotent."""
+        handler, mod = _load_handler()
+        handler._active_progress_cards["c1"] = "card1"
+        handler._progress_entries["c1"] = [
+            {"type": "tool_use", "tool": "bash", "preview": "ls"}
+        ]
+        to_thread = MagicMock()
+
+        async def run():
+            with patch("asyncio.to_thread", new=to_thread), \
+                 patch("asyncio.wait_for", new=AsyncMock()):
+                await handler.abort("c1", "recalled")
+                await handler.abort("c1", "recalled")  # idempotent
+
+        asyncio.run(run())
+        # Exactly one PATCH (the aborted-state render); second abort no-ops.
+        self.assertEqual(to_thread.call_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
