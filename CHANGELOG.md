@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.4.0 (2026-06-13)
+## v1.4.0 (2026-06-19)
 
 ### feat: runtime stats footer on response cards
 
@@ -11,6 +11,13 @@
 - 上下文占比从 `agent.context_compressor.last_prompt_tokens` / `context_length` 计算（与 Hermes 自身 `usage_percent` 公式一致，clamp 在 100%）
 - Duration 使用 `time.monotonic()` 在 `on_processing_start` / `on_processing_complete` 之间计算
 - Footer 数据缓存在 `_pending_footer`，由 `_finalize_response_card` 渲染到 Response 卡片底部（不是中间的 Completed 状态卡）
+
+### feat: token estimation fallback (GLM / z.ai)
+
+- 部分 provider（z.ai / GLM）streaming 接口不返回 usage，导致 footer token 恒为 0
+- session tokens 双 0 时：input 从 `agent.context_compressor.last_prompt_tokens` 读取，output 从最终回复字符数 ÷ 4 估算
+- `_patched_send` 捕获最终回复文本长度，缓存到 `_response_text_len[chat_id]` 供估算复用
+- token 双 0 时隐藏 footer 的 `↑0 ↓0 tokens` 段，避免误导（仍保留 ctx% 等其他统计）
 
 ### feat: <think>/<thinking> tag fallback stripping
 
