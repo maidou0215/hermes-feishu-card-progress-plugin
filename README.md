@@ -3,13 +3,13 @@
 [English](README.en.md) | 中文
 
 <p align="center">
-  <img src="assets/readme-cover.png" width="640" alt="feishu-card-progress cover">
+  <img src="assets/readme-cover.webp" width="640" alt="feishu-card-progress cover">
 </p>
 
 > **Hermes 飞书插件** —— 把工具执行进度与最终回复渲染成**实时更新的交互式卡片**，告别文本刷屏。纯 monkey-patch 架构，零额外进程，开箱即用。
 
 <p align="center">
-  <img src="assets/showcase.png" width="480" alt="feishu-card-progress 全家福效果">
+  <img src="assets/showcase.webp" width="480" alt="feishu-card-progress 全家福效果">
 </p>
 
 <sub>一张图展示全部能力：上方 🟢 <code>Completed</code> 进度卡片（💭 思考过程 + 🖥 工具调用步骤）→ 下方 🟦 <code>Response</code> 回复卡片（底部 <code>⏱ 🤖 🔧 ↑↓ ctx</code> 运行统计 footer）。</sub>

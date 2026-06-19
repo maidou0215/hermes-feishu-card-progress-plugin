@@ -3,13 +3,13 @@
 English | [中文](README.md)
 
 <p align="center">
-  <img src="assets/readme-cover.png" width="640" alt="feishu-card-progress cover">
+  <img src="assets/readme-cover.webp" width="640" alt="feishu-card-progress cover">
 </p>
 
 > **Hermes plugin for Feishu/Lark** — renders tool-execution progress and final replies as **live-updating interactive cards** instead of spamming text messages. Pure monkey-patch architecture, no extra process, works out of the box.
 
 <p align="center">
-  <img src="assets/showcase.png" width="480" alt="feishu-card-progress showcase">
+  <img src="assets/showcase.webp" width="480" alt="feishu-card-progress showcase">
 </p>
 
 <sub>One screenshot, every capability: top 🟢 <code>Completed</code> progress card (💭 reasoning + 🖥 tool-call steps) → bottom 🟦 <code>Response</code> reply card (footer with <code>⏱ 🤖 🔧 ↑↓ ctx</code> runtime stats).</sub>
