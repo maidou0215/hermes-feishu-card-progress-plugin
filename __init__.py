@@ -626,6 +626,10 @@ def _handle_message_recalled(adapter, loop, data) -> None:
     If the recalled message_id is the current request's user question
     (``_reply_to_message_id``), abort that chat so we stop PATCHing its
     progress card and skip sending a reply.
+
+    Note: ``loop`` is the module-level ``_event_loop_ref`` (the current
+    request's gateway loop). In a single-tenant gateway this is correct;
+    the ``_reply_to_message_id`` match is the primary correctness guard.
     """
     handler = getattr(adapter, "_card_handler_instance", None)
     chat_id = getattr(adapter, "_current_chat_id", None)
@@ -643,8 +647,8 @@ def _handle_message_recalled(adapter, loop, data) -> None:
                 recalled_id, chat_id)
     try:
         asyncio.run_coroutine_threadsafe(handler.abort(chat_id, "recalled"), loop)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("[Card] recall abort schedule failed: %s", exc)
 
 
 def _wrap_progress_callback(original_cb):

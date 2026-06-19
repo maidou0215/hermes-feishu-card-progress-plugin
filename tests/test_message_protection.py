@@ -236,6 +236,18 @@ class TestRecallHook(unittest.TestCase):
 
         loop.run_coroutine_threadsafe.assert_not_called()
 
+    def test_recall_missing_context_no_raise(self):
+        """helper must not raise when handler/chat_id/loop are missing."""
+        mod = self._load_init_mod()
+        adapter = MagicMock()
+        adapter._card_handler_instance = None  # no handler
+        loop = MagicMock()
+        data = MagicMock()
+        data.event.message_id = "om_x"
+        # Should return early without raising.
+        mod._handle_message_recalled(adapter, loop, data)
+        loop.run_coroutine_threadsafe.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
