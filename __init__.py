@@ -397,12 +397,15 @@ async def _patched_send(self, chat_id, content, reply_to=None, metadata=None):
                 last_result = r
                 if i == 0 and has_active_card and getattr(r, "message_id", None):
                     handler.track_response_message(chat_id, r.message_id)
+                    handler._response_text_len[chat_id] = len(content)
         return last_result
 
     result = await _orig_send(self, chat_id, content, reply_to=reply_to, metadata=metadata)
 
     if has_active_card and result and getattr(result, "message_id", None):
         handler.track_response_message(chat_id, result.message_id)
+        if isinstance(content, str):
+            handler._response_text_len[chat_id] = len(content)
 
     return result
 

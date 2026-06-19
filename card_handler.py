@@ -109,6 +109,7 @@ class FeishuCardHandler:
         self._progress_seq: Dict[str, int] = {}            # chat_id → monotonic entry counter
         self._last_sent_seq: Dict[str, int] = {}           # chat_id → last PATCH seq actually sent
         self._pending_footer: Dict[str, Dict[str, Any]] = {}  # chat_id → footer kwargs, applied on Response card
+        self._response_text_len: Dict[str, int] = {}        # chat_id → final response char len
         self._load_stale_cards()
 
     @property
@@ -191,6 +192,7 @@ class FeishuCardHandler:
         self._progress_entries.pop(chat_id, None)
         self._first_response_ids.pop(chat_id, None)
         self._last_response_payloads.pop(chat_id, None)
+        self._response_text_len.pop(chat_id, None)
         self._pending_footer.pop(chat_id, None)
 
     async def on_processing_complete(
@@ -211,6 +213,21 @@ class FeishuCardHandler:
         input_tokens = getattr(agent, "session_input_tokens", None) if agent else None
         output_tokens = getattr(agent, "session_output_tokens", None) if agent else None
         model = getattr(agent, "model", None) if agent else None
+
+        # Fallback: some providers (e.g. z.ai/glm) don't return usage in
+        # streaming, leaving session tokens at 0.  Estimate from context
+        # compressor (input) and last response content (output).
+        _est_input = _est_output = False
+        if agent and input_tokens == 0 and output_tokens == 0:
+            compressor = getattr(agent, "context_compressor", None)
+            _lp = getattr(compressor, "last_prompt_tokens", None)
+            if _lp and isinstance(_lp, (int, float)) and _lp > 0:
+                input_tokens = int(_lp)
+                _est_input = True
+            _last_content = self._response_text_len.get(chat_id, 0)
+            if isinstance(_last_content, int) and _last_content > 0:
+                output_tokens = _last_content // 4
+                _est_output = True
 
         # Context-window occupancy from context_compressor.  Mirrors Hermes'
         # own usage_percent = min(100, last_prompt_tokens / context_length * 100).
@@ -722,7 +739,10 @@ class FeishuCardHandler:
                 parts.append(f"\U0001f527 {tool_calls} calls")
         in_h = _humanize_tokens(input_tokens)
         out_h = _humanize_tokens(output_tokens)
-        if in_h or out_h:
+        # Show token counts only when we have real data (non-zero).
+        # Some providers (e.g. z.ai/glm) don't return usage in streaming,
+        # leaving both at 0 — showing "↑0 ↓0 tokens" is misleading.
+        if (in_h or out_h) and (input_tokens or output_tokens):
             parts.append(f"↑{in_h or '0'} ↓{out_h or '0'} tokens")
         if context_pct is not None:
             parts.append(f"ctx {context_pct:.0f}%")

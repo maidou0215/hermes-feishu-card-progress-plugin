@@ -183,8 +183,9 @@ class TestFooterRender(unittest.TestCase):
         )
         rendered = json.dumps(elements, ensure_ascii=False)
         self.assertIn("0.5", rendered)
-        # 0 tokens — we still render "0" so the user sees the turn was free.
-        self.assertIn("0", rendered)
+        # Both tokens zero — hide token segment to avoid "↑0 ↓0 tokens"
+        # noise from providers that don't return usage (e.g. z.ai/glm).
+        self.assertNotIn("tokens", rendered)
 
     def test_footer_with_bash_calls(self):
         """Footer renders total tool count plus a Bash-specific breakdown."""
