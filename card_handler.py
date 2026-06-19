@@ -363,6 +363,9 @@ class FeishuCardHandler:
         self, chat_id: str, tool_name: str, preview: str = ""
     ) -> Optional[str]:
         """Create/update card with tool info. Returns card message_id or None."""
+        if chat_id in self._aborted_chats:
+            logger.debug("[Card] on_tool_started skipped — chat %s aborted", chat_id)
+            return None
         logger.info("[Card] on_tool_started: tool=%s preview=%s chat=%s",
                      tool_name, (preview or "")[:60], chat_id)
 

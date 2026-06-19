@@ -263,6 +263,26 @@ class TestRecallHook(unittest.TestCase):
         loop.run_coroutine_threadsafe.assert_not_called()
 
 
+class TestOnToolStartedGuard(unittest.TestCase):
+    def test_aborted_chat_does_not_create_orphan_card(self):
+        """If a chat is aborted before any tool fires, on_tool_started must
+        NOT create a progress card (avoids orphan Running card)."""
+        handler, mod = _load_handler()
+        handler._mark_aborted("c1", "recalled")
+        send_card = AsyncMock(return_value="om_new")
+        handler._send_progress_card = send_card
+
+        async def run():
+            real = mod.FeishuCardHandler.on_tool_started.__get__(handler)
+            result = await real("c1", "bash", "ls")
+            return result
+
+        result = asyncio.run(run())
+        self.assertIsNone(result)
+        send_card.assert_not_called()
+        self.assertNotIn("c1", handler._active_progress_cards)
+
+
 class TestReplyGuard(unittest.TestCase):
     """Task 5: Reply guard — _patched_send must skip final replies for aborted chats."""
 
