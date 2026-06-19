@@ -78,6 +78,9 @@ class TestAbortRendering(unittest.TestCase):
         self.assertIn("Aborted", card["header"]["title"]["content"])
         body = json.dumps(card, ensure_ascii=False)
         self.assertIn("User recalled", body)
+        # Test agent_label parameter
+        custom = mod.FeishuCardHandler._build_aborted_card([], "recalled", agent_label="CustomBot")
+        self.assertIn("CustomBot · Aborted", custom["header"]["title"]["content"])
 
     def test_build_aborted_card_patch_failed_reason(self):
         handler, mod = _load_handler()

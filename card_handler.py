@@ -164,7 +164,7 @@ class FeishuCardHandler:
         async with self._get_patch_lock(chat_id):
             try:
                 entries = self._progress_entries.get(chat_id, [])
-                card = self._build_aborted_card(entries, reason)
+                card = self._build_aborted_card(entries, reason, self._agent_label)
                 from lark_oapi.api.im.v1 import PatchMessageRequestBody, PatchMessageRequest
                 body = (
                     PatchMessageRequestBody.builder()
@@ -833,7 +833,7 @@ class FeishuCardHandler:
         }]
 
     @staticmethod
-    def _build_aborted_card(entries: List[Dict], reason: str) -> Dict:
+    def _build_aborted_card(entries: List[Dict], reason: str, agent_label: str = "Hermes") -> Dict:
         """Build the grey 'Aborted' card payload for a terminated chat.
 
         Pure function — easy to unit test without a live Feishu client.
@@ -858,7 +858,7 @@ class FeishuCardHandler:
             "config": {"wide_screen_mode": True},
             "header": {
                 "title": {"tag": "plain_text",
-                          "content": "Hermes · Aborted"},
+                          "content": f"{agent_label} · Aborted"},
                 "template": "grey",
             },
             "body": {"elements": elements},
