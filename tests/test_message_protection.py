@@ -180,5 +180,62 @@ class TestAbortedGuards(unittest.TestCase):
         to_thread.assert_not_called()
 
 
+class TestRecallHook(unittest.TestCase):
+    """The recall hook matches the recalled message_id against the adapter's
+    current _reply_to_message_id and aborts that chat."""
+
+    def _load_init_mod(self):
+        import os
+        os.environ.pop("FEISHU_PROGRESS_STYLE", None)
+        spec = importlib.util.spec_from_file_location(
+            "feishu_card_progress_recall", _REPO_ROOT / "__init__.py"
+        )
+        from types import ModuleType
+        mock_ch = ModuleType("card_handler")
+        mock_ch.FeishuCardHandler = MagicMock()
+        sys.modules["card_handler"] = mock_ch
+        sys.modules["feishu_card_progress_recall.card_handler"] = mock_ch
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_recall_match_triggers_abort(self):
+        import asyncio
+        mod = self._load_init_mod()
+        adapter = MagicMock()
+        adapter._current_chat_id = "c1"
+        adapter._reply_to_message_id = "om_question"
+        handler = MagicMock()
+        # Make abort() return a coroutine
+        async def fake_abort(*a, **kw):
+            pass
+        handler.abort = fake_abort
+        adapter._card_handler_instance = handler
+        loop = MagicMock()
+        loop.is_closed.return_value = False  # Important: mock loop as not closed
+        data = MagicMock()
+        data.event.message_id = "om_question"  # matches the question
+
+        with patch("asyncio.run_coroutine_threadsafe") as mock_run:
+            mod._handle_message_recalled(adapter, loop, data)
+            mock_run.assert_called_once()
+
+    def test_recall_non_match_no_abort(self):
+        mod = self._load_init_mod()
+        adapter = MagicMock()
+        adapter._current_chat_id = "c1"
+        adapter._reply_to_message_id = "om_question"
+        handler = MagicMock()
+        adapter._card_handler_instance = handler
+        loop = MagicMock()
+        loop.is_closed.return_value = False  # Important: mock loop as not closed
+        data = MagicMock()
+        data.event.message_id = "om_other"  # different message
+
+        mod._handle_message_recalled(adapter, loop, data)
+
+        loop.run_coroutine_threadsafe.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

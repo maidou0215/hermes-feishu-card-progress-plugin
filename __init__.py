@@ -620,6 +620,33 @@ def _handle_reasoning_event(text: str) -> None:
         pass
 
 
+def _handle_message_recalled(adapter, loop, data) -> None:
+    """SDK recall callback (runs in a non-async thread).
+
+    If the recalled message_id is the current request's user question
+    (``_reply_to_message_id``), abort that chat so we stop PATCHing its
+    progress card and skip sending a reply.
+    """
+    handler = getattr(adapter, "_card_handler_instance", None)
+    chat_id = getattr(adapter, "_current_chat_id", None)
+    if not handler or not chat_id or not loop or loop.is_closed():
+        return
+    try:
+        event = getattr(data, "event", None)
+        recalled_id = str(getattr(event, "message_id", "") or "")
+    except Exception:
+        return
+    reply_to = str(getattr(adapter, "_reply_to_message_id", "") or "")
+    if not recalled_id or recalled_id != reply_to:
+        return
+    logger.info("[Card] User question recalled (%s) — aborting chat %s",
+                recalled_id, chat_id)
+    try:
+        asyncio.run_coroutine_threadsafe(handler.abort(chat_id, "recalled"), loop)
+    except Exception:
+        pass
+
+
 def _wrap_progress_callback(original_cb):
     """Wrap the gateway's progress_callback to intercept reasoning events.
 
@@ -748,6 +775,20 @@ def register(ctx) -> None:
 
     FeishuAdapter._on_message_event = _root_id_stripping_on_message_event
     logger.info("[feishu-card-progress] root_id stripped from inbound messages")
+
+    # Message protection: when a user recalls their question message,
+    # abort that chat's card updates (stop PATCH, no reply, flip to Aborted).
+    _orig_on_message_recalled = FeishuAdapter._on_message_recalled
+
+    def _patched_on_message_recalled(self, data):
+        try:
+            _handle_message_recalled(self, _event_loop_ref, data)
+        except Exception as exc:
+            logger.debug("[Card] recall hook error: %s", exc)
+        return _orig_on_message_recalled(self, data)
+
+    FeishuAdapter._on_message_recalled = _patched_on_message_recalled
+    logger.info("[feishu-card-progress] message-recall protection hooked")
 
     # Patch AIAgent._build_assistant_message to intercept reasoning and route to card.
     # Gateway never sets reasoning_callback, so the built-in reasoning_callback path
