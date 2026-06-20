@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.5.0 (2026-06-19)
+
+### feat: message protection (abort on recall / PATCH failure)
+
+- 用户撤回提问（`im.message.recalled_v1`）→ 终止该对话的进度卡片更新、不发回复
+- 进度卡片 PATCH 失败 → 终止后续 PATCH，避免无效 API 调用刷错误日志
+- 终止时把进度卡片翻成灰色 `Hermes · Aborted` 态（保留思考/工具步骤 + 提示文案）
+- 文案按原因区分：`⏹ User recalled the message` / `⏹ Card update failed, stopped`
+- 借鉴 Cheerwhy/hermes-lark-streaming；因飞书约束（用户撤不了 bot 消息）落点调整为「撤回提问 + PATCH 失败」
+- 新增 `tests/test_message_protection.py`（标记/幂等/守卫/渲染/主动/被动/回复）
+
 ## v1.4.0 (2026-06-19)
 
 ### feat: runtime stats footer on response cards

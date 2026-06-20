@@ -110,6 +110,7 @@ class FeishuCardHandler:
         self._last_sent_seq: Dict[str, int] = {}           # chat_id → last PATCH seq actually sent
         self._pending_footer: Dict[str, Dict[str, Any]] = {}  # chat_id → footer kwargs, applied on Response card
         self._response_text_len: Dict[str, int] = {}        # chat_id → final response char len
+        self._aborted_chats: set = set()                   # chat_ids aborted (recall / patch-fail)
         self._load_stale_cards()
 
     @property
@@ -122,6 +123,70 @@ class FeishuCardHandler:
         seq = self._progress_seq.get(chat_id, 0) + 1
         self._progress_seq[chat_id] = seq
         return seq
+
+    def _mark_aborted(self, chat_id: str, reason: str = "recalled") -> bool:
+        """Mark a chat as aborted. Idempotent; returns True on first abort.
+
+        Clears reply/footer tracking so no final reply is sent and no
+        Response header is finalized. Downstream PATCH/finalize paths
+        short-circuit via ``chat_id in self._aborted_chats``.
+        """
+        if chat_id in self._aborted_chats:
+            return False
+        self._aborted_chats.add(chat_id)
+        self._pending_footer.pop(chat_id, None)
+        self._first_response_ids.pop(chat_id, None)
+        logger.info("[Card] Aborted chat %s (reason=%s)", chat_id, reason)
+        return True
+
+    async def abort(self, chat_id: str, reason: str = "recalled") -> None:
+        """Abort a chat: stop all card updates and flip the active progress
+        card to a grey 'Aborted' state. Idempotent.
+
+        Safe to drive via ``run_coroutine_threadsafe`` from the SDK recall
+        callback (which runs in a non-async thread).
+        """
+        if not self._mark_aborted(chat_id, reason):
+            return  # already aborted
+        active_card_id = self._active_progress_cards.get(chat_id)
+        if active_card_id:
+            try:
+                await self._update_progress_card_aborted(active_card_id, chat_id, reason)
+            except Exception as exc:
+                logger.warning("[Card] Failed to render aborted card: %s", exc)
+
+    async def _update_progress_card_aborted(
+        self, card_message_id: str, chat_id: str, reason: str
+    ) -> None:
+        a = self._a
+        if not a._client:
+            return
+        async with self._get_patch_lock(chat_id):
+            try:
+                entries = self._progress_entries.get(chat_id, [])
+                card = self._build_aborted_card(entries, reason, self._agent_label)
+                from lark_oapi.api.im.v1 import PatchMessageRequestBody, PatchMessageRequest
+                body = (
+                    PatchMessageRequestBody.builder()
+                    .content(json.dumps(card, ensure_ascii=False))
+                    .build()
+                )
+                request = (
+                    PatchMessageRequest.builder()
+                    .message_id(card_message_id)
+                    .request_body(body)
+                    .build()
+                )
+                await asyncio.wait_for(
+                    asyncio.to_thread(a._client.im.v1.message.patch, request),
+                    timeout=_API_TIMEOUT,
+                )
+                logger.info("[Card] Rendered aborted card %s (reason=%s)",
+                            card_message_id, reason)
+            except asyncio.TimeoutError:
+                logger.warning("[Card] Aborted card update timed out (%ds)", _API_TIMEOUT)
+            except Exception as exc:
+                logger.warning("[Card] Aborted card update error: %s", exc)
 
     def _get_patch_lock(self, chat_id: str) -> "asyncio.Lock":
         lock = self._patch_locks.get(chat_id)
@@ -188,6 +253,7 @@ class FeishuCardHandler:
         self._turn_start_times[chat_id] = time.monotonic()
 
         self._completed_chats.discard(chat_id)
+        self._aborted_chats.discard(chat_id)
         self._active_progress_cards.pop(chat_id, None)
         self._progress_entries.pop(chat_id, None)
         self._first_response_ids.pop(chat_id, None)
@@ -297,6 +363,9 @@ class FeishuCardHandler:
         self, chat_id: str, tool_name: str, preview: str = ""
     ) -> Optional[str]:
         """Create/update card with tool info. Returns card message_id or None."""
+        if chat_id in self._aborted_chats:
+            logger.debug("[Card] on_tool_started skipped — chat %s aborted", chat_id)
+            return None
         logger.info("[Card] on_tool_started: tool=%s preview=%s chat=%s",
                      tool_name, (preview or "")[:60], chat_id)
 
@@ -460,10 +529,13 @@ class FeishuCardHandler:
         — prevents an older snapshot from overwriting newer content
         when network reordering happens.
         """
+        if chat_id in self._aborted_chats:
+            return
         a = self._a
         if not a._client:
             return
         lock = self._get_patch_lock(chat_id)
+        patch_failed = False
         async with lock:
             if seq is not None and seq < self._last_sent_seq.get(chat_id, 0):
                 logger.debug(
@@ -507,12 +579,20 @@ class FeishuCardHandler:
                     self._last_sent_seq[chat_id] = seq
             except asyncio.TimeoutError:
                 logger.warning("[Card] Progress card patch timed out (%ds)", _API_TIMEOUT)
+                patch_failed = True
             except Exception as exc:
                 logger.warning("[Card] Progress card patch error: %s", exc)
+                patch_failed = True
+        # Call abort() after releasing the lock to avoid deadlock
+        # (abort() → _update_progress_card_aborted() acquires the same lock)
+        if patch_failed:
+            await self.abort(chat_id, "patch_failed")
 
     async def _update_progress_card_completed(
         self, card_message_id: str, chat_id: str,
     ) -> None:
+        if chat_id in self._aborted_chats:
+            return
         a = self._a
         if not a._client:
             return
@@ -567,6 +647,8 @@ class FeishuCardHandler:
     async def _update_progress_card_failed(
         self, card_message_id: str, chat_id: str
     ) -> None:
+        if chat_id in self._aborted_chats:
+            return
         a = self._a
         if not a._client:
             return
@@ -653,6 +735,8 @@ class FeishuCardHandler:
 
     async def _finalize_response_card(self, chat_id: str) -> None:
         """Patch the last response message with an indigo header and footer."""
+        if chat_id in self._aborted_chats:
+            return
         msg_id = self._first_response_ids.pop(chat_id, None)
         payload = self._last_response_payloads.pop(chat_id, None)
         footer_data = self._pending_footer.pop(chat_id, None)
@@ -758,6 +842,38 @@ class FeishuCardHandler:
                 "text_color": "grey",
             },
         }]
+
+    @staticmethod
+    def _build_aborted_card(entries: List[Dict], reason: str, agent_label: str = "Hermes") -> Dict:
+        """Build the grey 'Aborted' card payload for a terminated chat.
+
+        Pure function — easy to unit test without a live Feishu client.
+        """
+        trimmed = entries[-_MAX_ENTRIES:]
+        truncated = len(entries) > _MAX_ENTRIES
+        elements = FeishuCardHandler._render_progress_entries(trimmed, truncated)
+        message = ("⏹ User recalled the message" if reason == "recalled"
+                   else "⏹ Card update failed, stopped")
+        elements.append({"tag": "hr"})
+        elements.append({
+            "tag": "div",
+            "text": {
+                "tag": "plain_text",
+                "content": message,
+                "text_size": "notation",
+                "text_color": "grey",
+            },
+        })
+        return {
+            "schema": "2.0",
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text",
+                          "content": f"{agent_label} · Aborted"},
+                "template": "grey",
+            },
+            "body": {"elements": elements},
+        }
 
     @staticmethod
     def _render_progress_entries(
