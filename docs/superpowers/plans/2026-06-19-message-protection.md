@@ -400,15 +400,22 @@ Expected: FAIL — chat 未进入 `_aborted_chats`（当前 except 只 log，不
                 logger.warning("[Card] Progress card patch error: %s", exc)
 ```
 
-改为（在 log 之后触发被动 abort）：
+改为（**关键：`abort()` 必须在 patch lock 外调用** —— `abort()→_update_progress_card_aborted()` 会重入 `_get_patch_lock(chat_id)`，而 `asyncio.Lock` 不可重入，在 lock 内调会死锁。用标志位在 `async with lock:` 块外触发）：
 
 ```python
+        patch_failed = False
+        async with lock:
+            ...（原有 stale-drop 检查 + try PATCH 不变）
             except asyncio.TimeoutError:
                 logger.warning("[Card] Progress card patch timed out (%ds)", _API_TIMEOUT)
-                await self.abort(chat_id, "patch_failed")
+                patch_failed = True
             except Exception as exc:
                 logger.warning("[Card] Progress card patch error: %s", exc)
-                await self.abort(chat_id, "patch_failed")
+                patch_failed = True
+        # 在 lock 外调 abort：_update_progress_card_aborted 会重入 _get_patch_lock，
+        # asyncio.Lock 不可重入，lock 内调会死锁。
+        if patch_failed:
+            await self.abort(chat_id, "patch_failed")
 ```
 
 - [ ] **Step 4: 运行测试，确认通过**
@@ -616,27 +623,23 @@ class TestReplyGuard(unittest.TestCase):
 Run: `python3 -m unittest tests.test_message_protection.TestReplyGuard -v`
 Expected: FAIL — `_orig_send` 被调用了（当前无守卫，回复照发）。
 
-- [ ] **Step 3: 在 `_patched_send` 回复分支加守卫**
+- [ ] **Step 3: 在 `_patched_send` 加守卫（位置和条件见下方修正）**
 
-`__init__.py` 的 `_patched_send`，在 `result = await _orig_send(...)`（约 403 行）之前加守卫。找到这行：
+`__init__.py` 的 `_patched_send`，在 track response（`has_active_card = ...`）之后、**表格拆分分支**（`if _table_overflow_mode == "split"...`）**之前**插入守卫。
 
-```python
-    result = await _orig_send(self, chat_id, content, reply_to=reply_to, metadata=metadata)
-```
-
-在它**之前**插入：
+⚠️ **两处修正**（实现时发现的 plan 缺陷）：
+1. **位置**：必须在表格拆分分支**之前**，否则多表格回复从拆分分支漏网发送。
+2. **条件**：用 `chat_id in handler._aborted_chats`，**不**用 `has_active_card`（`on_processing_complete` 会 `_active_progress_cards.pop`，send 回复时 has_active_card 可能已 False）。
 
 ```python
-    # Message protection: if this chat was aborted (user recalled the
-    # question / PATCH failed), do not send the final reply.
-    if has_active_card and chat_id in handler._aborted_chats:
+    # Message protection: skip final reply for aborted chats. Placed before
+    # the table-split branch (so multi-table replies are skipped too) and
+    # keyed on _aborted_chats (has_active_card may already be popped).
+    if chat_id in handler._aborted_chats:
         logger.info("[Card] Skipping final reply for aborted chat %s", chat_id)
         from gateway.platforms.base import SendResult
         return SendResult(success=True)
-
 ```
-
-（`has_active_card` 和 `handler` 已在上方约 371-372 行定义，复用即可。）
 
 - [ ] **Step 4: 运行测试，确认通过**
 
