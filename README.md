@@ -61,6 +61,12 @@ hermes gateway restart
 | `FEISHU_PROGRESS_RESPONSE_HEADER` | `true` | 设为 `false` 关闭最终回复的 turquoise Response header |
 | `FEISHU_PROGRESS_TABLE_OVERFLOW` | `split` | `split` 多卡片分片（≤5 表/卡）；`post` 回退 Feishu Post 消息（无表格限制） |
 
+## X/Twitter 进度卡片示例
+
+如果 Hermes 同时安装 [Hermes Tweet](https://github.com/Xquik-dev/hermes-tweet)，X/Twitter 监控、读帖或发帖任务的工具调用过程可以通过本插件展示成进度卡片。最终回复卡片可汇总关键数据、异常账号和下一步建议。
+
+如需启用发帖类动作，请在对应 Profile 中单独开启 Hermes Tweet 的动作开关，让读取能力和写入能力保持分离。
+
 ## 🏗 架构
 
 纯 monkey-patch，不引入 sidecar 或额外进程，直接增强 Hermes 自身的 `FeishuAdapter` / `AIAgent`：
